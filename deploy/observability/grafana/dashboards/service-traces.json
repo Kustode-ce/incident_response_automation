@@ -1,0 +1,170 @@
+{
+  "uid": "service-traces",
+  "title": "Service Traces - Incident Response",
+  "description": "Distributed tracing with Tempo integration",
+  "tags": ["tracing", "tempo", "distributed"],
+  "timezone": "browser",
+  "refresh": "30s",
+  "time": {"from": "now-1h", "to": "now"},
+  "schemaVersion": 38,
+  "templating": {
+    "list": [
+      {
+        "name": "service",
+        "type": "query",
+        "datasource": {"type": "prometheus", "uid": "prometheus-spm"},
+        "query": "label_values(traces_spanmetrics_calls_total, service_name)",
+        "multi": false,
+        "includeAll": false,
+        "label": "Service"
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 0},
+      "type": "row",
+      "title": "🔍 TRACE OVERVIEW"
+    },
+    {
+      "id": 2,
+      "title": "Trace Search",
+      "type": "traces",
+      "gridPos": {"h": 12, "w": 24, "x": 0, "y": 1},
+      "datasource": {"type": "tempo", "uid": "tempo"},
+      "targets": [{
+        "queryType": "nativeSearch",
+        "serviceName": "${service}",
+        "limit": 50
+      }]
+    },
+    {
+      "id": 10,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 13},
+      "type": "row",
+      "title": "📊 SPAN METRICS (RED)"
+    },
+    {
+      "id": 11,
+      "title": "Request Rate from Traces",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 14},
+      "datasource": {"type": "prometheus", "uid": "prometheus-spm"},
+      "targets": [{
+        "expr": "sum(rate(traces_spanmetrics_calls_total{service_name=~\"$service\"}[5m])) by (service_name)",
+        "legendFormat": "{{service_name}}"
+      }],
+      "fieldConfig": {"defaults": {"unit": "reqps"}}
+    },
+    {
+      "id": 12,
+      "title": "Error Rate from Traces",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 14},
+      "datasource": {"type": "prometheus", "uid": "prometheus-spm"},
+      "targets": [{
+        "expr": "sum(rate(traces_spanmetrics_calls_total{service_name=~\"$service\", status_code=\"STATUS_CODE_ERROR\"}[5m])) by (service_name) / sum(rate(traces_spanmetrics_calls_total{service_name=~\"$service\"}[5m])) by (service_name) * 100",
+        "legendFormat": "{{service_name}}"
+      }],
+      "fieldConfig": {"defaults": {"unit": "percent"}}
+    },
+    {
+      "id": 13,
+      "title": "Latency P95 from Traces",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 14},
+      "datasource": {"type": "prometheus", "uid": "prometheus-spm"},
+      "targets": [{
+        "expr": "histogram_quantile(0.95, sum(rate(traces_spanmetrics_duration_seconds_bucket{service_name=~\"$service\"}[5m])) by (le, service_name))",
+        "legendFormat": "{{service_name}} P95"
+      }],
+      "fieldConfig": {"defaults": {"unit": "s"}}
+    },
+    {
+      "id": 20,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 22},
+      "type": "row",
+      "title": "🌐 SERVICE MAP"
+    },
+    {
+      "id": 21,
+      "title": "Service Dependency Graph",
+      "type": "nodeGraph",
+      "gridPos": {"h": 12, "w": 24, "x": 0, "y": 23},
+      "datasource": {"type": "tempo", "uid": "tempo"},
+      "targets": [{
+        "queryType": "serviceMap"
+      }]
+    },
+    {
+      "id": 30,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 35},
+      "type": "row",
+      "title": "📝 SPAN DETAILS"
+    },
+    {
+      "id": 31,
+      "title": "Slowest Spans",
+      "type": "table",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 36},
+      "datasource": {"type": "prometheus", "uid": "prometheus-spm"},
+      "targets": [{
+        "expr": "topk(10, histogram_quantile(0.95, sum(rate(traces_spanmetrics_duration_seconds_bucket{service_name=~\"$service\"}[5m])) by (le, span_name)))",
+        "format": "table",
+        "instant": true
+      }],
+      "fieldConfig": {
+        "defaults": {"unit": "s"},
+        "overrides": [
+          {"matcher": {"id": "byName", "options": "span_name"}, "properties": [{"id": "custom.width", "value": 300}]}
+        ]
+      }
+    },
+    {
+      "id": 32,
+      "title": "Most Frequent Spans",
+      "type": "table",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 36},
+      "datasource": {"type": "prometheus", "uid": "prometheus-spm"},
+      "targets": [{
+        "expr": "topk(10, sum(rate(traces_spanmetrics_calls_total{service_name=~\"$service\"}[5m])) by (span_name))",
+        "format": "table",
+        "instant": true
+      }],
+      "fieldConfig": {
+        "defaults": {"unit": "reqps"},
+        "overrides": [
+          {"matcher": {"id": "byName", "options": "span_name"}, "properties": [{"id": "custom.width", "value": 300}]}
+        ]
+      }
+    },
+    {
+      "id": 40,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 44},
+      "type": "row",
+      "title": "📋 CORRELATED LOGS"
+    },
+    {
+      "id": 41,
+      "title": "Logs with Trace IDs",
+      "type": "logs",
+      "gridPos": {"h": 10, "w": 24, "x": 0, "y": 45},
+      "datasource": {"type": "loki", "uid": "loki"},
+      "targets": [{
+        "expr": "{service=\"$service\"} |= \"trace_id\"",
+        "legendFormat": ""
+      }],
+      "options": {
+        "showTime": true,
+        "showLabels": true,
+        "showCommonLabels": false,
+        "wrapLogMessage": false,
+        "prettifyLogMessage": false,
+        "enableLogDetails": true,
+        "dedupStrategy": "none",
+        "sortOrder": "Descending"
+      }
+    }
+  ]
+}

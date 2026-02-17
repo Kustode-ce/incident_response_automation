@@ -1,0 +1,199 @@
+# Prometheus Alert Rules for Incident Response Automation
+
+groups:
+  - name: incident-api
+    rules:
+      # SLO Burn Rate (fast window)
+      - alert: IncidentAPISLOBurnRateFast
+        expr: |
+          max(sre_slo_burn_rate{service="incident-api", slo=~"availability|latency", window="5m"}) > 2
+        for: 2m
+        labels:
+          severity: critical
+          service: incident-api
+        annotations:
+          summary: "Incident API SLO burn rate high (fast)"
+          description: "SLO burn rate {{ $value | printf \"%.2f\" }} over 5m window"
+
+      # SLO Burn Rate (slow window)
+      - alert: IncidentAPISLOBurnRateSlow
+        expr: |
+          max(sre_slo_burn_rate{service="incident-api", slo=~"availability|latency", window="30m"}) > 1
+        for: 10m
+        labels:
+          severity: warning
+          service: incident-api
+        annotations:
+          summary: "Incident API SLO burn rate elevated (slow)"
+          description: "SLO burn rate {{ $value | printf \"%.2f\" }} over 30m window"
+
+      # Degraded Mode
+      - alert: IncidentAPIDegradedMode
+        expr: |
+          max(sre_degraded_mode{service="incident-api"}) == 1
+        for: 2m
+        labels:
+          severity: warning
+          service: incident-api
+        annotations:
+          summary: "Incident API is in degraded mode"
+          description: "Degraded mode reason: {{ $labels.reason }}"
+
+      # Canary Unhealthy
+      - alert: IncidentAPICanaryUnhealthy
+        expr: |
+          sre_canary_health{service="incident-api"} == 0
+        for: 2m
+        labels:
+          severity: warning
+          service: incident-api
+        annotations:
+          summary: "Incident API canary unhealthy"
+          description: "Canary health is unhealthy with traffic share {{ $value }}"
+
+      # Recovery Readiness Failed
+      - alert: IncidentAPIRecoveryNotReady
+        expr: |
+          sre_recovery_ready{service="incident-api"} == 0
+        for: 5m
+        labels:
+          severity: critical
+          service: incident-api
+        annotations:
+          summary: "Incident API recovery not ready"
+          description: "Recovery readiness signal is not ready"
+
+      # Disk Pressure
+      - alert: IncidentAPIDiskPressure
+        expr: |
+          max(sre_disk_pressure{service="incident-api"}) == 1
+        for: 2m
+        labels:
+          severity: warning
+          service: incident-api
+        annotations:
+          summary: "Incident API disk pressure detected"
+          description: "Disk pressure on mount {{ $labels.mount }}"
+
+      # Mitigation Recommended
+      - alert: IncidentAPIMitigationRecommended
+        expr: |
+          max(sre_mitigation_recommended{service="incident-api"}) == 1
+        for: 1m
+        labels:
+          severity: warning
+          service: incident-api
+        annotations:
+          summary: "Mitigation recommended for Incident API"
+          description: "Recommended action: {{ $labels.action }}"
+
+      # API High Error Rate
+      - alert: APIHighErrorRate
+        expr: |
+          sum(rate(http_requests_total{job="incident-api", status=~"5.."}[5m])) 
+          / sum(rate(http_requests_total{job="incident-api"}[5m])) > 0.05
+        for: 2m
+        labels:
+          severity: critical
+          service: incident-api
+        annotations:
+          summary: "High error rate on Incident API"
+          description: "Error rate is {{ $value | printf \"%.2f\" }}% over the last 5 minutes"
+          runbook_url: "https://wiki.kustode.com/runbooks/api-errors"
+
+      # API High Latency
+      - alert: APIHighLatency
+        expr: |
+          histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket{job="incident-api"}[5m])) by (le)) > 2
+        for: 5m
+        labels:
+          severity: warning
+          service: incident-api
+        annotations:
+          summary: "High latency on Incident API"
+          description: "99th percentile latency is {{ $value | printf \"%.2f\" }}s"
+
+      # API Down
+      - alert: APIDown
+        expr: up{job="incident-api"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          service: incident-api
+        annotations:
+          summary: "Incident API is down"
+          description: "The incident-api service has been down for more than 1 minute"
+
+  - name: database
+    rules:
+      # Database Connection Pool Exhausted
+      - alert: DatabaseConnectionPoolExhausted
+        expr: pg_stat_activity_count >= pg_settings_max_connections * 0.9
+        for: 2m
+        labels:
+          severity: critical
+          service: database
+        annotations:
+          summary: "Database connection pool nearly exhausted"
+          description: "{{ $value }} connections used, approaching max limit"
+
+  - name: redis
+    rules:
+      # Redis Memory High
+      - alert: RedisMemoryHigh
+        expr: redis_memory_used_bytes / redis_memory_max_bytes > 0.9
+        for: 5m
+        labels:
+          severity: warning
+          service: redis
+        annotations:
+          summary: "Redis memory usage is high"
+          description: "Redis memory is at {{ $value | printf \"%.0f\" }}%"
+
+      # Redis Down
+      - alert: RedisDown
+        expr: redis_up == 0
+        for: 1m
+        labels:
+          severity: critical
+          service: redis
+        annotations:
+          summary: "Redis is down"
+          description: "Redis has been unreachable for more than 1 minute"
+
+  - name: celery
+    rules:
+      # Celery Queue Backlog
+      - alert: CeleryQueueBacklog
+        expr: celery_queue_length > 100
+        for: 5m
+        labels:
+          severity: warning
+          service: celery
+        annotations:
+          summary: "Celery queue has high backlog"
+          description: "Queue {{ $labels.queue }} has {{ $value }} pending tasks"
+
+  - name: incidents
+    rules:
+      # High Incident Volume
+      - alert: HighIncidentVolume
+        expr: increase(incidents_created_total[1h]) > 50
+        for: 0m
+        labels:
+          severity: warning
+          service: incident-response
+        annotations:
+          summary: "High incident creation rate"
+          description: "{{ $value }} incidents created in the last hour"
+
+      # Incident Resolution Time High
+      - alert: IncidentResolutionTimeHigh
+        expr: avg(incident_resolution_time_seconds) > 3600
+        for: 30m
+        labels:
+          severity: warning
+          service: incident-response
+        annotations:
+          summary: "Average incident resolution time is high"
+          description: "Average MTTR is {{ $value | printf \"%.0f\" }} seconds"

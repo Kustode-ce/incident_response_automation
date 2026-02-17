@@ -1,0 +1,71 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__
+*.py[cod]
+*$py.class
+*.so
+.Python
+.pytest_cache
+.mypy_cache
+.ruff_cache
+*.egg-info
+dist
+build
+eggs
+parts
+var
+sdist
+develop-eggs
+.installed.cfg
+lib
+lib64
+venv
+.venv
+env
+.env.local
+.env.*.local
+
+# IDE
+.idea
+.vscode
+*.swp
+*.swo
+*~
+
+# Testing
+htmlcov
+.coverage
+.tox
+.nox
+coverage.xml
+*.cover
+
+# Documentation
+docs/_build
+*.md
+!README.md
+
+# Docker
+Dockerfile*
+docker-compose*.yml
+.docker
+
+# Deployment (keep only what's needed)
+deploy/k8s
+deploy/helm
+
+# Misc
+*.log
+*.logs
+tmp
+temp
+.DS_Store
+Thumbs.db
+
+# Local development
+.env.local
+*.local
+node_modules

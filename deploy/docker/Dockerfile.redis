@@ -1,0 +1,25 @@
+# Dockerfile for Redis Cache/Message Broker
+# Build: docker build -f deploy/docker/Dockerfile.redis -t incident-redis .
+# Extends official Redis with custom configuration
+
+FROM redis:7-alpine
+
+# Set labels
+LABEL maintainer="incident-response-automation"
+LABEL description="Redis cache and message broker for Incident Response Automation"
+
+# Copy custom Redis configuration
+COPY deploy/docker/redis.conf /usr/local/etc/redis/redis.conf
+
+# Create data directory
+RUN mkdir -p /data && chown redis:redis /data
+
+# Health check
+HEALTHCHECK --interval=10s --timeout=3s --start-period=10s --retries=5 \
+    CMD redis-cli ping | grep -q PONG || exit 1
+
+# Expose Redis port
+EXPOSE 6379
+
+# Run Redis with custom config
+CMD ["redis-server", "/usr/local/etc/redis/redis.conf"]

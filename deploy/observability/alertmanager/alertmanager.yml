@@ -1,0 +1,74 @@
+# Alertmanager Configuration for Incident Response Automation
+
+global:
+  resolve_timeout: 5m
+
+# Route configuration
+route:
+  # Default receiver
+  receiver: 'incident-response'
+  
+  # Group alerts by alertname and service
+  group_by: ['alertname', 'service']
+  
+  # Wait before sending initial notification
+  group_wait: 30s
+  
+  # Wait before sending updated notifications
+  group_interval: 5m
+  
+  # Wait before resending notifications
+  repeat_interval: 4h
+
+  # Child routes for different severity levels
+  routes:
+    # Critical alerts - immediate notification
+    - match:
+        severity: critical
+      receiver: 'incident-response-critical'
+      group_wait: 10s
+      repeat_interval: 1h
+
+    # Warning alerts - standard notification
+    - match:
+        severity: warning
+      receiver: 'incident-response'
+      group_wait: 1m
+      repeat_interval: 4h
+
+# Receivers
+receivers:
+  # Default receiver - sends to incident response webhook
+  - name: 'incident-response'
+    webhook_configs:
+      - url: 'http://api:8000/webhooks/alertmanager'
+        send_resolved: true
+        http_config:
+          basic_auth:
+            username: alertmanager
+            password: ${ALERTMANAGER_WEBHOOK_SECRET:-secret}
+
+  # Critical alerts receiver
+  - name: 'incident-response-critical'
+    webhook_configs:
+      - url: 'http://api:8000/webhooks/alertmanager'
+        send_resolved: true
+        http_config:
+          basic_auth:
+            username: alertmanager
+            password: ${ALERTMANAGER_WEBHOOK_SECRET:-secret}
+    
+    # Also send to Slack for critical alerts (optional)
+    # slack_configs:
+    #   - api_url: '${SLACK_WEBHOOK_URL}'
+    #     channel: '#incidents-critical'
+    #     title: '{{ .GroupLabels.alertname }}'
+    #     text: '{{ range .Alerts }}{{ .Annotations.description }}{{ end }}'
+
+# Inhibition rules - suppress lower severity alerts when critical is firing
+inhibit_rules:
+  - source_match:
+      severity: 'critical'
+    target_match:
+      severity: 'warning'
+    equal: ['alertname', 'service']

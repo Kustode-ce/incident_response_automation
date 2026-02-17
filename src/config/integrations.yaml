@@ -1,0 +1,515 @@
+# External System Integrations Configuration
+# Define connections to monitoring, alerting, and communication systems
+
+# ============================================
+# Observability Integrations
+# ============================================
+
+observability:
+  prometheus:
+    enabled: true
+    url: ${PROMETHEUS_URL:http://prometheus:9090}
+    timeout: 30
+    verify_ssl: true
+    
+    # Authentication
+    auth:
+      type: none  # none, basic, bearer
+      # username: ${PROMETHEUS_USER}
+      # password: ${PROMETHEUS_PASSWORD}
+      # token: ${PROMETHEUS_TOKEN}
+    
+    # Query configuration
+    queries:
+      default_step: 15s
+      max_points: 1000
+      timeout: 30s
+    
+    # Metrics to collect for context
+    context_metrics:
+      - name: cpu_usage
+        query: 'rate(container_cpu_usage_seconds_total{namespace="{{namespace}}", pod=~"{{pod}}.*"}[5m]) * 100'
+        
+      - name: memory_usage
+        query: 'container_memory_usage_bytes{namespace="{{namespace}}", pod=~"{{pod}}.*"} / container_spec_memory_limit_bytes * 100'
+        
+      - name: request_rate
+        query: 'rate(http_requests_total{namespace="{{namespace}}", service="{{service}}"}[5m])'
+        
+      - name: error_rate
+        query: 'rate(http_requests_total{namespace="{{namespace}}", service="{{service}}", status=~"5.."}[5m])'
+        
+      - name: latency_p99
+        query: 'histogram_quantile(0.99, rate(http_request_duration_seconds_bucket{namespace="{{namespace}}"}[5m]))'
+    
+    # Alert status checking
+    alerts:
+      endpoint: /api/v1/alerts
+      poll_interval: 30s
+  
+  loki:
+    enabled: true
+    url: ${LOKI_URL:http://loki:3100}
+    timeout: 30
+    verify_ssl: true
+    
+    # Authentication
+    auth:
+      type: none
+    
+    # Query configuration
+    queries:
+      default_limit: 1000
+      max_lines: 5000
+      timeout: 30s
+      
+    # Log queries for context
+    context_queries:
+      - name: error_logs
+        query: '{namespace="{{namespace}}", pod=~"{{pod}}.*"} |= "ERROR"'
+        time_range: 15m
+        
+      - name: warning_logs
+        query: '{namespace="{{namespace}}", pod=~"{{pod}}.*"} |= "WARN"'
+        time_range: 15m
+        
+      - name: application_logs
+        query: '{namespace="{{namespace}}", pod=~"{{pod}}.*", container="app"}'
+        time_range: 15m
+    
+    # Log parsing
+    parsing:
+      extract_json: true
+      extract_level: true
+      extract_timestamp: true
+      extract_trace_id: true
+  
+  grafana:
+    enabled: true
+    url: ${GRAFANA_URL:http://grafana:3000}
+    timeout: 30
+    verify_ssl: true
+    
+    # Authentication
+    auth:
+      type: bearer
+      token: ${GRAFANA_API_KEY}
+    
+    # Dashboard configuration
+    dashboards:
+      incident_overview: ${GRAFANA_INCIDENT_DASHBOARD_UID}
+      service_health: ${GRAFANA_SERVICE_DASHBOARD_UID}
+      
+    # Snapshot configuration
+    snapshots:
+      enabled: true
+      expire_seconds: 604800  # 7 days
+      external: true
+    
+    # Annotations
+    annotations:
+      enabled: true
+      tags:
+        - incident
+        - automated-response
+
+# ============================================
+# Infrastructure Integrations
+# ============================================
+
+infrastructure:
+  kubernetes:
+    enabled: true
+    
+    # Connection mode
+    in_cluster: ${K8S_IN_CLUSTER:true}
+    kubeconfig_path: ${KUBECONFIG:~/.kube/config}
+    context: ${K8S_CONTEXT:}
+    
+    # Namespaces to monitor
+    namespaces:
+      - production
+      - staging
+      # - default
+    
+    # RBAC configuration
+    service_account: incident-response-sa
+    
+    # Operations configuration
+    operations:
+      scale_deployment:
+        enabled: true
+        max_replicas: 50
+        cooldown_seconds: 300
+        
+      restart_pods:
+        enabled: true
+        max_pods_per_action: 5
+        grace_period_seconds: 30
+        
+      rollback_deployment:
+        enabled: true
+        revision: previous
+        
+      update_configmap:
+        enabled: false  # Risky, disabled by default
+        
+      delete_resources:
+        enabled: false  # Very risky, disabled
+    
+    # Resource limits for safety
+    limits:
+      min_replicas: 1
+      max_scale_factor: 3  # Can't scale more than 3x current
+      production_protection: true
+    
+    # Monitoring
+    watch_resources:
+      - pods
+      - deployments
+      - services
+      - configmaps
+      - events
+
+# ============================================
+# Communication Integrations
+# ============================================
+
+communication:
+  slack:
+    enabled: true
+    webhook_url: ${SLACK_WEBHOOK_URL:}
+    bot_token: ${SLACK_BOT_TOKEN}
+    app_token: ${SLACK_APP_TOKEN}
+    signing_secret: ${SLACK_SIGNING_SECRET}
+    
+    # Channels
+    channels:
+      incidents: ${SLACK_INCIDENTS_CHANNEL:#incidents}
+      critical: ${SLACK_CRITICAL_CHANNEL:#critical-incidents}
+      resolved: ${SLACK_RESOLVED_CHANNEL:#incidents-resolved}
+      
+    # Notification settings
+    notifications:
+      create_thread: true
+      use_blocks: true
+      mention_on_call: true
+      mention_team: false
+      
+      # Severity-based routing
+      severity_routing:
+        critical:
+          channels:
+            - incidents
+            - critical
+          mention: "@channel"
+        high:
+          channels:
+            - incidents
+          mention: "@here"
+        medium:
+          channels:
+            - incidents
+          mention: ""
+        low:
+          channels:
+            - incidents
+          mention: ""
+    
+    # Interactive features
+    interactive:
+      enabled: true
+      approval_timeout: 900  # 15 minutes
+      buttons:
+        - approve_runbook
+        - reject_runbook
+        - escalate
+        - resolve
+        - add_comment
+    
+    # Rate limiting
+    rate_limit:
+      messages_per_minute: 20
+      
+  email:
+    enabled: false
+    smtp_host: ${SMTP_HOST}
+    smtp_port: ${SMTP_PORT:587}
+    smtp_user: ${SMTP_USER}
+    smtp_password: ${SMTP_PASSWORD}
+    from_address: ${EMAIL_FROM:incidents@company.com}
+    use_tls: true
+    
+    # Email templates
+    templates:
+      incident_created: templates/email/incident_created.html
+      incident_resolved: templates/email/incident_resolved.html
+      approval_required: templates/email/approval_required.html
+    
+    # Recipients
+    recipients:
+      critical: ${EMAIL_ONCALL}
+      default: ${EMAIL_SRE_TEAM}
+  
+  microsoft_teams:
+    enabled: false
+    webhook_url: ${TEAMS_WEBHOOK_URL}
+    
+    # Channel routing
+    channels:
+      incidents: ${TEAMS_INCIDENTS_WEBHOOK}
+      critical: ${TEAMS_CRITICAL_WEBHOOK}
+
+# ============================================
+# Incident Management Integrations
+# ============================================
+
+incident_management:
+  pagerduty:
+    enabled: true
+    api_key: ${PAGERDUTY_API_KEY}
+    api_url: https://api.pagerduty.com
+    
+    # Integration key for events
+    integration_key: ${PAGERDUTY_INTEGRATION_KEY}
+    
+    # Services
+    services:
+      production: ${PAGERDUTY_PRODUCTION_SERVICE_ID}
+      staging: ${PAGERDUTY_STAGING_SERVICE_ID}
+    
+    # Escalation policies
+    escalation_policies:
+      default: ${PAGERDUTY_DEFAULT_ESCALATION_POLICY}
+      critical: ${PAGERDUTY_CRITICAL_ESCALATION_POLICY}
+    
+    # Incident creation rules
+    create_incident:
+      severity_threshold: high  # Create PD incident for high/critical
+      auto_create: true
+      
+    # Sync settings
+    sync:
+      enabled: true
+      bidirectional: true
+      sync_interval: 60s
+  
+  opsgenie:
+    enabled: false
+    api_key: ${OPSGENIE_API_KEY}
+    api_url: https://api.opsgenie.com
+    
+    # Teams
+    teams:
+      - ${OPSGENIE_SRE_TEAM}
+      
+    # Priority mapping
+    priority_mapping:
+      critical: P1
+      high: P2
+      medium: P3
+      low: P4
+      info: P5
+  
+  jira:
+    enabled: true
+    url: ${JIRA_URL}
+    username: ${JIRA_USERNAME}
+    api_token: ${JIRA_API_TOKEN}
+    issue_type: ${JIRA_ISSUE_TYPE:Bug}
+    
+    # Project configuration
+    project_key: ${JIRA_PROJECT:INC}
+    issue_type: Incident
+    
+    # Field mapping
+    field_mapping:
+      severity:
+        critical: Highest
+        high: High
+        medium: Medium
+        low: Low
+        info: Lowest
+      
+    # Create tickets for
+    create_ticket:
+      severity_threshold: medium
+      auto_create: false  # Manual for now
+
+# ============================================
+# Cloud Provider Integrations
+# ============================================
+
+cloud_providers:
+  aws:
+    enabled: false  # Set to true to enable AWS integrations
+    region: ${AWS_REGION:us-west-2}
+    access_key_id: ${AWS_ACCESS_KEY_ID}
+    secret_access_key: ${AWS_SECRET_ACCESS_KEY}
+    use_iam_role: ${AWS_USE_IAM_ROLE:false}  # Recommended for production
+    
+    # Services
+    services:
+      ec2:
+        enabled: false  # Set to true to enable EC2 integration
+        
+        # Safety limits
+        limits:
+          max_instances_per_action: 5
+          allowed_operations:
+            - describe
+            - start
+            - stop
+            - reboot
+            - create_image
+            - get_metrics
+            - get_console_output
+          
+          # Require manual approval for these operations
+          require_approval:
+            - terminate
+            - modify_instance_type
+            - modify_security_groups
+          
+          # Environment protections
+          production_protection: true
+          protected_tags:
+            Environment: production
+            Critical: "true"
+            ManagedBy: terraform  # Don't touch terraform-managed resources
+        
+        # Auto Scaling Groups
+        auto_scaling:
+          enabled: true
+          max_scale_up_factor: 2.0  # Can't scale more than 2x current capacity
+          min_instances: 2  # Never scale below this
+          max_instances: 50
+          cooldown_seconds: 300
+          
+          # ASG operations allowed
+          allowed_asg_operations:
+            - describe
+            - set_desired_capacity
+            - suspend_processes
+            - resume_processes
+        
+        # CloudWatch integration
+        cloudwatch:
+          enabled: true
+          metric_period: 300  # 5 minutes
+          metrics_to_collect:
+            - CPUUtilization
+            - NetworkIn
+            - NetworkOut
+            - StatusCheckFailed
+            - StatusCheckFailed_Instance
+            - StatusCheckFailed_System
+            - DiskReadBytes
+            - DiskWriteBytes
+          
+        # Tagging for resources created by automation
+        automation_tags:
+          ManagedBy: incident-response-automation
+          AutomatedAction: "true"
+      
+      ecs:
+        enabled: false
+        # ECS configuration would go here
+        
+      lambda:
+        enabled: false
+        # Lambda configuration would go here
+        
+      rds:
+        enabled: false
+        # RDS configuration would go here
+  
+  gcp:
+    enabled: false
+    project_id: ${GCP_PROJECT_ID}
+    credentials_file: ${GOOGLE_APPLICATION_CREDENTIALS}
+    
+    # Services
+    services:
+      compute:
+        enabled: false
+      gke:
+        enabled: false
+      cloud_functions:
+        enabled: false
+  
+  azure:
+    enabled: false
+    subscription_id: ${AZURE_SUBSCRIPTION_ID}
+    tenant_id: ${AZURE_TENANT_ID}
+    client_id: ${AZURE_CLIENT_ID}
+    client_secret: ${AZURE_CLIENT_SECRET}
+
+# ============================================
+# Version Control Integrations
+# ============================================
+
+version_control:
+  github:
+    enabled: true
+    token: ${GITHUB_TOKEN}
+    api_url: https://api.github.com
+    
+    # Repository
+    repository: ${GITHUB_REPO}
+    
+    # Operations
+    operations:
+      trigger_deployment:
+        enabled: false
+      create_rollback_pr:
+        enabled: false
+      add_incident_comment:
+        enabled: true
+  
+  gitlab:
+    enabled: false
+    token: ${GITLAB_TOKEN}
+    api_url: ${GITLAB_URL:https://gitlab.com}
+
+# ============================================
+# Integration Health Monitoring
+# ============================================
+
+monitoring:
+  health_checks:
+    enabled: true
+    interval_seconds: 300
+    timeout_seconds: 10
+    
+  circuit_breaker:
+    enabled: true
+    failure_threshold: 5
+    recovery_timeout: 60
+    half_open_max_calls: 3
+    
+  retry:
+    max_attempts: 3
+    initial_delay: 1
+    max_delay: 30
+    exponential_base: 2
+    
+  metrics:
+    enabled: true
+    track_latency: true
+    track_errors: true
+    track_rate_limits: true
+
+# ============================================
+# Integration Testing
+# ============================================
+
+testing:
+  enabled: true
+  test_on_startup: true
+  test_endpoints:
+    prometheus: /api/v1/query?query=up
+    loki: /loki/api/v1/labels
+    grafana: /api/health
+    slack: /api/auth.test
+    kubernetes: /version

@@ -1,0 +1,91 @@
+# Grafana Datasources Configuration
+# Mirrors medical_billing setup for consistent observability
+
+apiVersion: 1
+
+datasources:
+  # Prometheus - Metrics (Application + SRE Golden Signals)
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    uid: prometheus
+    jsonData:
+      timeInterval: "15s"
+      httpMethod: POST
+      exemplarTraceIdDestinations:
+        - name: trace_id
+          datasourceUid: tempo
+
+  # Prometheus SPM - Span Metrics from OTEL Collector
+  - name: Prometheus-SPM
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    editable: false
+    uid: prometheus-spm
+    jsonData:
+      timeInterval: "15s"
+      httpMethod: POST
+
+  # Tempo - Distributed Tracing
+  - name: Tempo
+    type: tempo
+    access: proxy
+    url: http://tempo:3200
+    uid: tempo
+    editable: false
+    jsonData:
+      httpMethod: GET
+      tracesToLogs:
+        datasourceUid: loki
+        tags: ['service', 'trace_id']
+        mappedTags: [{ key: 'service.name', value: 'service' }]
+        mapTagNamesEnabled: true
+        spanStartTimeShift: '-1h'
+        spanEndTimeShift: '1h'
+        filterByTraceID: true
+        filterBySpanID: false
+      tracesToMetrics:
+        datasourceUid: prometheus
+        tags: [{ key: 'service.name', value: 'service' }]
+        queries:
+          - name: 'Request Rate'
+            query: 'sum(rate(http_requests_total{service="$${__tags.service}"}[5m]))'
+          - name: 'Error Rate'
+            query: 'sum(rate(http_requests_total{service="$${__tags.service}",status=~"5.."}[5m]))'
+      serviceMap:
+        datasourceUid: prometheus
+      nodeGraph:
+        enabled: true
+      lokiSearch:
+        datasourceUid: loki
+
+  # Loki - Logs
+  - name: Loki
+    type: loki
+    access: proxy
+    url: http://loki:3100
+    uid: loki
+    editable: false
+    jsonData:
+      maxLines: 1000
+      derivedFields:
+        - datasourceUid: tempo
+          matcherRegex: '"trace_id":"(\\w+)"'
+          name: TraceID
+          url: '$${__value.raw}'
+        - datasourceUid: tempo
+          matcherRegex: 'trace_id=(\\w+)'
+          name: TraceID
+          url: '$${__value.raw}'
+
+  # Jaeger - Alternative Tracing UI
+  - name: Jaeger
+    type: jaeger
+    access: proxy
+    url: http://jaeger:16686
+    uid: jaeger
+    editable: false

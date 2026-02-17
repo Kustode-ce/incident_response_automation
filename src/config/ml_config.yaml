@@ -1,0 +1,265 @@
+# ML Orchestrator Configuration
+# This file defines ML model providers, routing rules, and optimization settings
+
+# Model Providers
+providers:
+  openai:
+    enabled: true
+    api_key: ${OPENAI_API_KEY}
+    base_url: https://api.openai.com/v1
+    organization: ${OPENAI_ORG_ID}
+    timeout: 30
+    max_retries: 3
+    
+  anthropic:
+    enabled: true
+    api_key: ${ANTHROPIC_API_KEY}
+    base_url: https://api.anthropic.com
+    timeout: 30
+    max_retries: 3
+    
+  local:
+    enabled: false
+    model_path: /models/local-llm
+    device: cuda  # cuda, cpu, mps
+    max_memory_gb: 16
+
+# Model Definitions
+models:
+  # Classification Model
+  gpt-4-turbo:
+    provider: openai
+    model_name: gpt-4-turbo-preview
+    model_version: gpt-4-0125-preview
+    capabilities:
+      - classification
+      - runbook_generation
+    max_input_tokens: 128000
+    max_output_tokens: 4096
+    cost_per_input_token: 0.00001  # $0.01 per 1K tokens
+    cost_per_output_token: 0.00003  # $0.03 per 1K tokens
+    temperature: 0.3
+    json_mode: true
+    
+  gpt-3.5-turbo:
+    provider: openai
+    model_name: gpt-3.5-turbo-0125
+    model_version: gpt-3.5-0125
+    capabilities:
+      - classification
+      - severity_prediction
+    max_input_tokens: 16385
+    max_output_tokens: 4096
+    cost_per_input_token: 0.0000005  # $0.50 per 1M tokens
+    cost_per_output_token: 0.0000015  # $1.50 per 1M tokens
+    temperature: 0.3
+    json_mode: true
+    
+  claude-3-opus:
+    provider: anthropic
+    model_name: claude-3-opus-20240229
+    model_version: claude-3-opus-20240229
+    capabilities:
+      - root_cause_analysis
+      - classification
+      - runbook_generation
+    max_input_tokens: 200000
+    max_output_tokens: 4096
+    cost_per_input_token: 0.000015  # $15 per 1M tokens
+    cost_per_output_token: 0.000075  # $75 per 1M tokens
+    temperature: 0.5
+    json_mode: false
+    
+  claude-3-sonnet:
+    provider: anthropic
+    model_name: claude-3-sonnet-20240229
+    model_version: claude-3-sonnet-20240229
+    capabilities:
+      - classification
+      - severity_prediction
+    max_input_tokens: 200000
+    max_output_tokens: 4096
+    cost_per_input_token: 0.000003  # $3 per 1M tokens
+    cost_per_output_token: 0.000015  # $15 per 1M tokens
+    temperature: 0.3
+    json_mode: false
+
+# Model Routing Rules
+routing:
+  classification:
+    primary: gpt-4-turbo
+    secondary: claude-3-opus
+    fallback: gpt-3.5-turbo
+    cost_optimization: true  # Use cheaper model for simple cases
+    complexity_threshold: 0.7  # Above this, use primary
+    
+  severity_prediction:
+    primary: ensemble-severity
+    secondary: gpt-4-turbo
+    fallback: gpt-3.5-turbo
+    
+  root_cause_analysis:
+    primary: claude-3-opus  # Best reasoning
+    secondary: gpt-4-turbo
+    fallback: claude-3-sonnet
+    rag_enabled: true
+    rag_top_k: 5
+    
+  runbook_generation:
+    primary: gpt-4-turbo
+    secondary: claude-3-opus
+    fallback: gpt-3.5-turbo
+    template_library_enabled: true
+    safety_validation: true
+    
+  post_mortem_generation:
+    primary: claude-3-opus  # Best for detailed writing
+    secondary: gpt-4-turbo
+    fallback: claude-3-sonnet
+
+# Ensemble Models
+ensembles:
+  ensemble-severity:
+    type: weighted_average
+    models:
+      - model: xgboost-severity
+        weight: 0.4
+      - model: gpt-3.5-turbo
+        weight: 0.6
+    aggregation: weighted_average
+
+# Caching Configuration
+caching:
+  enabled: true
+  backend: redis
+  ttl:
+    classification: 3600  # 1 hour
+    severity_prediction: 300  # 5 minutes
+    root_cause_analysis: 1800  # 30 minutes
+    runbook_generation: 0  # No caching (always fresh)
+    post_mortem_generation: 0
+  cache_key_fields:
+    - alert_name
+    - labels.namespace
+    - labels.service
+    - fingerprint
+
+# Rate Limiting
+rate_limiting:
+  enabled: true
+  strategy: token_bucket
+  limits:
+    openai:
+      requests_per_minute: 500
+      tokens_per_minute: 150000
+    anthropic:
+      requests_per_minute: 50
+      tokens_per_minute: 100000
+  backoff:
+    initial_delay: 1
+    max_delay: 60
+    multiplier: 2
+
+# Cost Management
+cost_management:
+  enabled: true
+  daily_budget_usd: 100.0
+  alert_threshold_percent: 80  # Alert at 80% of budget
+  hard_limit: true  # Stop at budget limit
+  optimization:
+    prefer_cheaper_models: true
+    complexity_threshold: 0.7
+    estimate_before_call: true
+
+# Prompt Engineering
+prompts:
+  templates_dir: src/services/ml/prompt_templates
+  template_format: jinja2
+  include_examples: true
+  max_examples: 3
+  context_optimization:
+    enabled: true
+    max_tokens_per_context: 100000
+    prioritize:
+      - alerts
+      - error_logs
+      - similar_incidents
+      - kubernetes_state
+      - metrics
+
+# RAG (Retrieval Augmented Generation)
+rag:
+  enabled: true
+  vector_db:
+    type: qdrant
+    host: ${QDRANT_HOST}
+    port: 6333
+    collection: incident_history
+    api_key: ${QDRANT_API_KEY}
+  embeddings:
+    provider: openai
+    model: text-embedding-3-small
+    dimensions: 1536
+    cost_per_token: 0.0000001  # $0.10 per 1M tokens
+  search:
+    top_k: 5
+    min_similarity: 0.7
+    rerank: true
+
+# Monitoring & Observability
+monitoring:
+  metrics_enabled: true
+  prometheus:
+    namespace: incident_response
+    subsystem: ml
+  logging:
+    level: INFO
+    format: json
+    include_prompts: false  # Privacy - don't log full prompts
+    include_responses: false  # Privacy - don't log full responses
+    log_metadata: true  # Log model, latency, cost
+  tracing:
+    enabled: true
+    sample_rate: 0.1  # Trace 10% of requests
+
+# Model Performance Tracking
+performance:
+  track_accuracy: true
+  feedback_collection: true
+  a_b_testing:
+    enabled: false
+    experiments: []
+  model_evaluation:
+    frequency: daily
+    metrics:
+      - accuracy
+      - latency
+      - cost
+      - user_satisfaction
+
+# Safety & Validation
+safety:
+  content_filtering: true
+  output_validation: true
+  runbook_validation:
+    risk_assessment: true
+    destructive_action_check: true
+    production_protection: true
+  sensitive_data_redaction: true
+  redact_patterns:
+    - api_key
+    - password
+    - token
+    - secret
+
+# Feature Flags
+features:
+  classification: true
+  severity_prediction: true
+  root_cause_analysis: true
+  runbook_generation: true
+  post_mortem_generation: true
+  auto_execution: true  # Allow automated runbook execution
+  continuous_learning: true
+  model_fallback: true
+  context_enrichment: true

@@ -1,0 +1,365 @@
+# Model Definitions
+# Detailed configuration for each ML model used in the system
+
+models:
+  # ============================================
+  # OpenAI Models
+  # ============================================
+  
+  gpt-4-turbo:
+    name: GPT-4 Turbo
+    provider: openai
+    model_id: gpt-4-turbo-preview
+    version: gpt-4-0125-preview
+    
+    # Capabilities
+    capabilities:
+      - classification
+      - root_cause_analysis
+      - runbook_generation
+      - post_mortem_generation
+    
+    # Technical specs
+    context_window: 128000
+    max_output_tokens: 4096
+    supports_json_mode: true
+    supports_function_calling: true
+    supports_vision: false
+    
+    # Pricing (per 1K tokens)
+    pricing:
+      input: 0.01
+      output: 0.03
+      currency: USD
+    
+    # Performance characteristics
+    performance:
+      average_latency_ms: 3000
+      p95_latency_ms: 8000
+      throughput_rpm: 500
+    
+    # Default parameters
+    defaults:
+      temperature: 0.3
+      top_p: 1.0
+      frequency_penalty: 0.0
+      presence_penalty: 0.0
+      
+  gpt-3.5-turbo:
+    name: GPT-3.5 Turbo
+    provider: openai
+    model_id: gpt-3.5-turbo-0125
+    version: gpt-3.5-0125
+    
+    capabilities:
+      - classification
+      - severity_prediction
+    
+    context_window: 16385
+    max_output_tokens: 4096
+    supports_json_mode: true
+    supports_function_calling: true
+    
+    pricing:
+      input: 0.0005
+      output: 0.0015
+      currency: USD
+    
+    performance:
+      average_latency_ms: 1500
+      p95_latency_ms: 3000
+      throughput_rpm: 3500
+    
+    defaults:
+      temperature: 0.3
+      top_p: 1.0
+  
+  text-embedding-3-small:
+    name: Text Embedding 3 Small
+    provider: openai
+    model_id: text-embedding-3-small
+    version: text-embedding-3-small
+    
+    capabilities:
+      - embedding
+    
+    context_window: 8191
+    output_dimensions: 1536
+    
+    pricing:
+      input: 0.0001
+      output: 0.0
+      currency: USD
+    
+    performance:
+      average_latency_ms: 200
+      throughput_rpm: 3000
+
+  # ============================================
+  # Anthropic Models
+  # ============================================
+  
+  claude-3-opus:
+    name: Claude 3 Opus
+    provider: anthropic
+    model_id: claude-3-opus-20240229
+    version: claude-3-opus-20240229
+    
+    capabilities:
+      - classification
+      - root_cause_analysis
+      - runbook_generation
+      - post_mortem_generation
+    
+    context_window: 200000
+    max_output_tokens: 4096
+    supports_json_mode: false
+    supports_function_calling: false
+    supports_vision: true
+    
+    pricing:
+      input: 0.015
+      output: 0.075
+      currency: USD
+    
+    performance:
+      average_latency_ms: 4000
+      p95_latency_ms: 10000
+      throughput_rpm: 50
+    
+    defaults:
+      temperature: 0.5
+      top_p: 1.0
+      top_k: 250
+      
+  claude-3-sonnet:
+    name: Claude 3 Sonnet
+    provider: anthropic
+    model_id: claude-3-sonnet-20240229
+    version: claude-3-sonnet-20240229
+    
+    capabilities:
+      - classification
+      - severity_prediction
+      - root_cause_analysis
+    
+    context_window: 200000
+    max_output_tokens: 4096
+    supports_json_mode: false
+    supports_vision: true
+    
+    pricing:
+      input: 0.003
+      output: 0.015
+      currency: USD
+    
+    performance:
+      average_latency_ms: 2000
+      p95_latency_ms: 5000
+      throughput_rpm: 200
+    
+    defaults:
+      temperature: 0.3
+      top_p: 1.0
+
+  # ============================================
+  # Traditional ML Models
+  # ============================================
+  
+  xgboost-severity:
+    name: XGBoost Severity Predictor
+    provider: local
+    model_id: xgboost-severity-v1
+    version: "1.0.0"
+    
+    capabilities:
+      - severity_prediction
+    
+    # Model file location
+    model_path: /models/xgboost_severity_v1.pkl
+    
+    # Input features
+    features:
+      - alert_severity_encoded
+      - affected_pods_count
+      - error_rate
+      - service_criticality_score
+      - is_business_hours
+      - hour_of_day
+      - day_of_week
+      - historical_avg_severity
+    
+    # Output
+    output:
+      type: regression
+      range: [0.0, 10.0]
+      
+    # No API costs
+    pricing:
+      input: 0.0
+      output: 0.0
+      currency: USD
+    
+    performance:
+      average_latency_ms: 50
+      p95_latency_ms: 100
+      throughput_rps: 1000
+    
+    # Model metadata
+    metadata:
+      training_date: "2026-01-01"
+      training_samples: 10000
+      validation_accuracy: 0.87
+      feature_importance:
+        error_rate: 0.35
+        service_criticality_score: 0.25
+        affected_pods_count: 0.20
+        historical_avg_severity: 0.15
+        is_business_hours: 0.05
+
+  # ============================================
+  # Ensemble Models
+  # ============================================
+  
+  ensemble-severity:
+    name: Severity Prediction Ensemble
+    provider: ensemble
+    model_id: ensemble-severity-v1
+    version: "1.0.0"
+    
+    capabilities:
+      - severity_prediction
+    
+    # Ensemble configuration
+    ensemble:
+      strategy: weighted_average
+      members:
+        - model: xgboost-severity
+          weight: 0.4
+        - model: gpt-3.5-turbo
+          weight: 0.6
+      
+      # Aggregation rules
+      aggregation:
+        method: weighted_average
+        confidence_threshold: 0.7
+        fallback_model: gpt-4-turbo
+    
+    # Combined pricing
+    pricing:
+      estimated_input: 0.0003  # Weighted average
+      estimated_output: 0.0009
+      currency: USD
+    
+    performance:
+      average_latency_ms: 1600  # Max of components
+      throughput_rpm: 1000
+
+# Model Selection Strategies
+selection_strategies:
+  cost_optimized:
+    description: Minimize cost while maintaining quality
+    rules:
+      - if: incident.severity == "info"
+        use: gpt-3.5-turbo
+      - if: incident.severity == "low"
+        use: gpt-3.5-turbo
+      - if: incident.severity in ["medium", "high", "critical"]
+        use: gpt-4-turbo
+  
+  performance_optimized:
+    description: Minimize latency
+    rules:
+      - if: task == "classification"
+        use: gpt-3.5-turbo
+      - if: task == "severity_prediction"
+        use: xgboost-severity
+      - if: task == "root_cause_analysis"
+        use: claude-3-sonnet
+      - if: task == "runbook_generation"
+        use: gpt-4-turbo
+  
+  quality_optimized:
+    description: Maximum quality regardless of cost
+    rules:
+      - if: task == "classification"
+        use: gpt-4-turbo
+      - if: task == "severity_prediction"
+        use: ensemble-severity
+      - if: task == "root_cause_analysis"
+        use: claude-3-opus
+      - if: task == "runbook_generation"
+        use: claude-3-opus
+  
+  balanced:
+    description: Balance of cost, performance, and quality
+    rules:
+      - if: incident.severity in ["critical", "high"]
+        use: quality_optimized
+      - if: incident.environment == "production"
+        use: quality_optimized
+      - else:
+        use: cost_optimized
+
+# Active Strategy
+active_strategy: balanced
+
+# Model Health Checks
+health_checks:
+  enabled: true
+  interval_seconds: 300  # Check every 5 minutes
+  timeout_seconds: 10
+  failure_threshold: 3  # Mark unhealthy after 3 failures
+  success_threshold: 2  # Mark healthy after 2 successes
+
+# Model Warm-up
+warmup:
+  enabled: true
+  on_startup: true
+  models:
+    - gpt-4-turbo
+    - gpt-3.5-turbo
+    - claude-3-opus
+
+# A/B Testing
+ab_testing:
+  enabled: false
+  experiments: []
+  # Example experiment:
+  # - name: "claude-vs-gpt4-root-cause"
+  #   task: root_cause_analysis
+  #   variants:
+  #     - model: claude-3-opus
+  #       traffic_percent: 50
+  #     - model: gpt-4-turbo
+  #       traffic_percent: 50
+  #   metrics:
+  #     - accuracy
+  #     - latency
+  #     - cost
+  #     - user_feedback
+  #   duration_days: 7
+
+# Model Deprecation Schedule
+deprecation:
+  scheduled:
+    # Example: Deprecate old model versions
+    # - model: gpt-3.5-turbo-old
+    #   deprecation_date: "2026-03-01"
+    #   replacement: gpt-3.5-turbo
+    #   migration_plan: automatic
+
+# Model Training & Fine-tuning
+training:
+  enabled: false  # Enable when ready for custom models
+  schedule: weekly
+  data_sources:
+    - historical_incidents
+    - user_feedback
+    - manual_resolutions
+  validation:
+    split: 0.2
+    min_samples: 1000
+  auto_deploy:
+    enabled: false
+    min_accuracy_improvement: 0.05

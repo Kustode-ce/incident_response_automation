@@ -1,0 +1,278 @@
+{
+  "uid": "sre-golden-signals",
+  "title": "SRE Golden Signals - Incident Response",
+  "description": "Google SRE 4 Golden Signals: Latency, Traffic, Errors, Saturation",
+  "tags": ["sre", "golden-signals", "incident-response"],
+  "timezone": "browser",
+  "refresh": "30s",
+  "time": {"from": "now-1h", "to": "now"},
+  "schemaVersion": 38,
+  "templating": {
+    "list": [
+      {
+        "name": "service",
+        "type": "query",
+        "datasource": {"type": "prometheus", "uid": "prometheus"},
+        "query": "label_values(http_requests_total, job)",
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".*",
+        "label": "Service"
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 0},
+      "type": "row",
+      "title": "📊 EXECUTIVE OVERVIEW"
+    },
+    {
+      "id": 2,
+      "title": "Availability (SLO: 99.9%)",
+      "type": "gauge",
+      "gridPos": {"h": 6, "w": 6, "x": 0, "y": 1},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{
+        "expr": "((sum(rate(http_requests_total{job=~\"$service\"}[5m])) - sum(rate(http_requests_total{job=~\"$service\", status=~\"5..\"}[5m]))) / clamp_min(sum(rate(http_requests_total{job=~\"$service\"}[5m])), 1)) * 100",
+        "legendFormat": "Availability %"
+      }],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 95,
+          "max": 100,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "red", "value": null},
+              {"color": "yellow", "value": 99},
+              {"color": "green", "value": 99.9}
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 3,
+      "title": "P95 Latency (SLO: <500ms)",
+      "type": "gauge",
+      "gridPos": {"h": 6, "w": 6, "x": 6, "y": 1},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{
+        "expr": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{job=~\"$service\"}[5m])) by (le)) * 1000",
+        "legendFormat": "P95 Latency"
+      }],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "min": 0,
+          "max": 1000,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "yellow", "value": 300},
+              {"color": "red", "value": 500}
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 4,
+      "title": "Error Rate (SLO: <1%)",
+      "type": "gauge",
+      "gridPos": {"h": 6, "w": 6, "x": 12, "y": 1},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{
+        "expr": "(sum(rate(http_requests_total{job=~\"$service\", status=~\"[45]..\"}[5m])) / clamp_min(sum(rate(http_requests_total{job=~\"$service\"}[5m])), 1)) * 100",
+        "legendFormat": "Error Rate %"
+      }],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 10,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "yellow", "value": 0.5},
+              {"color": "red", "value": 1}
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 5,
+      "title": "Requests In Progress",
+      "type": "stat",
+      "gridPos": {"h": 6, "w": 6, "x": 18, "y": 1},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{
+        "expr": "sum(http_requests_in_progress{job=~\"$service\"}) or vector(0)",
+        "legendFormat": "Active"
+      }],
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "thresholds": {"mode": "absolute", "steps": [{"color": "blue", "value": null}]}
+        }
+      }
+    },
+    {
+      "id": 10,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 7},
+      "type": "row",
+      "title": "⚡ GOLDEN SIGNAL #1: LATENCY"
+    },
+    {
+      "id": 11,
+      "title": "Request Latency Percentiles",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"expr": "histogram_quantile(0.50, sum(rate(http_request_duration_seconds_bucket{job=~\"$service\"}[5m])) by (le))", "legendFormat": "P50"},
+        {"expr": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{job=~\"$service\"}[5m])) by (le))", "legendFormat": "P95"},
+        {"expr": "histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket{job=~\"$service\"}[5m])) by (le))", "legendFormat": "P99"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "s"}}
+    },
+    {
+      "id": 12,
+      "title": "Latency by Endpoint",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{
+        "expr": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{job=~\"$service\"}[5m])) by (le, endpoint))",
+        "legendFormat": "{{endpoint}}"
+      }],
+      "fieldConfig": {"defaults": {"unit": "s"}}
+    },
+    {
+      "id": 20,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 16},
+      "type": "row",
+      "title": "📈 GOLDEN SIGNAL #2: TRAFFIC"
+    },
+    {
+      "id": 21,
+      "title": "Requests Per Second",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 17},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{
+        "expr": "sum(rate(http_requests_total{job=~\"$service\"}[5m])) by (job)",
+        "legendFormat": "{{job}}"
+      }],
+      "fieldConfig": {"defaults": {"unit": "reqps"}}
+    },
+    {
+      "id": 22,
+      "title": "Requests by Status Code",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 17},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{
+        "expr": "sum(rate(http_requests_total{job=~\"$service\"}[5m])) by (status)",
+        "legendFormat": "{{status}}"
+      }],
+      "fieldConfig": {"defaults": {"unit": "reqps"}}
+    },
+    {
+      "id": 30,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 25},
+      "type": "row",
+      "title": "❌ GOLDEN SIGNAL #3: ERRORS"
+    },
+    {
+      "id": 31,
+      "title": "Error Rate by Service",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 26},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{
+        "expr": "sum(rate(http_requests_total{job=~\"$service\", status=~\"[45]..\"}[5m])) by (job) / sum(rate(http_requests_total{job=~\"$service\"}[5m])) by (job) * 100",
+        "legendFormat": "{{job}}"
+      }],
+      "fieldConfig": {"defaults": {"unit": "percent"}}
+    },
+    {
+      "id": 32,
+      "title": "Errors by Type",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 26},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{
+        "expr": "sum(rate(http_errors_total{service=~\"$service\"}[5m])) by (error_type)",
+        "legendFormat": "{{error_type}}"
+      }],
+      "fieldConfig": {"defaults": {"unit": "reqps"}}
+    },
+    {
+      "id": 40,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 34},
+      "type": "row",
+      "title": "🔋 GOLDEN SIGNAL #4: SATURATION"
+    },
+    {
+      "id": 41,
+      "title": "Requests In Progress Over Time",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 35},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{
+        "expr": "sum(http_requests_in_progress{job=~\"$service\"}) by (job)",
+        "legendFormat": "{{job}}"
+      }]
+    },
+    {
+      "id": 42,
+      "title": "APDEX Score by Category",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 35},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{
+        "expr": "(sum(rate(apdex_requests_total{satisfaction=\"satisfied\"}[5m])) + sum(rate(apdex_requests_total{satisfaction=\"tolerating\"}[5m])) / 2) / clamp_min(sum(rate(apdex_requests_total[5m])), 1)",
+        "legendFormat": "APDEX Score"
+      }],
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "max": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "red", "value": null},
+              {"color": "yellow", "value": 0.7},
+              {"color": "green", "value": 0.9}
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 50,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 43},
+      "type": "row",
+      "title": "🔍 DISTRIBUTED TRACES"
+    },
+    {
+      "id": 51,
+      "title": "Recent Traces",
+      "type": "traces",
+      "gridPos": {"h": 10, "w": 24, "x": 0, "y": 44},
+      "datasource": {"type": "tempo", "uid": "tempo"},
+      "targets": [{
+        "queryType": "nativeSearch",
+        "serviceName": "${service}",
+        "limit": 20
+      }]
+    }
+  ]
+}

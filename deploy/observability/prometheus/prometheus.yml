@@ -1,0 +1,81 @@
+# Prometheus Configuration for Incident Response Automation
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    monitor: 'incident-response'
+
+# Alertmanager configuration
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+            - alertmanager:9093
+
+# Rule files
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+# Scrape configs
+scrape_configs:
+  # Prometheus itself
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+        labels:
+          service: 'prometheus'
+
+  # Incident Response API
+  - job_name: 'incident-api'
+    metrics_path: '/metrics'
+    static_configs:
+      - targets: ['api:8000']
+        labels:
+          service: 'incident-api'
+          env: 'development'
+
+  # OTEL Collector - Application Metrics
+  - job_name: 'otel-collector'
+    metrics_path: '/metrics'
+    static_configs:
+      - targets: ['otel-collector:8889']
+        labels:
+          service: 'otel-collector'
+          type: 'application-metrics'
+
+  # OTEL Collector - Span Metrics (RED metrics from traces)
+  - job_name: 'otel-spanmetrics'
+    metrics_path: '/metrics'
+    static_configs:
+      - targets: ['otel-collector:8890']
+        labels:
+          service: 'otel-collector'
+          type: 'span-metrics'
+
+  # OTEL Collector - Self Telemetry
+  - job_name: 'otel-collector-self'
+    metrics_path: '/metrics'
+    static_configs:
+      - targets: ['otel-collector:8888']
+        labels:
+          service: 'otel-collector'
+          type: 'self-telemetry'
+
+  # Tempo - Tracing Backend (optional)
+  - job_name: 'tempo'
+    static_configs:
+      - targets: ['tempo:3200']
+        labels:
+          service: 'tempo'
+
+  # Jaeger - Tracing UI (optional)
+  - job_name: 'jaeger'
+    static_configs:
+      - targets: ['jaeger:14269']
+        labels:
+          service: 'jaeger'
+
+# Remote write to external systems (optional)
+# remote_write:
+#   - url: "http://your-remote-write-endpoint/api/v1/write"

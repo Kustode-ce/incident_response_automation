@@ -1,0 +1,482 @@
+# Example Runbook Definitions
+# These are sample runbooks that demonstrate the capabilities of the system
+
+runbooks:
+  # ==============================================
+  # Example 1: High CPU Usage Response
+  # ==============================================
+  high-cpu-auto-scale:
+    name: "Auto-Scale on High CPU"
+    description: "Automatically scale deployment when CPU usage exceeds threshold"
+    version: "1.0.0"
+    enabled: true
+    auto_execute: true  # Safe to auto-execute
+    
+    # When to trigger this runbook
+    trigger_conditions:
+      alert_names:
+        - HighCPUUsage
+        - PodCPUThrottling
+      severities:
+        - critical
+        - high
+      labels:
+        environment: production
+    
+    # Runbook steps
+    steps:
+      - id: notify-start
+        name: "Notify team of auto-response"
+        type: notification
+        description: "Send Slack notification that auto-scaling is starting"
+        params:
+          integration: slack
+          channel: "#incidents"
+          message: |
+            🤖 Auto-Response Initiated
+            
+            **Incident**: {{ incident.id }}
+            **Alert**: High CPU usage on {{ incident.labels.pod }}
+            **Action**: Scaling deployment
+            **Current CPU**: {{ incident.ml_insights.metrics.cpu_usage }}%
+        risk_level: low
+        
+      - id: check-current-replicas
+        name: "Check current replica count"
+        type: kubernetes_action
+        params:
+          action: get_deployment
+          namespace: "{{ incident.labels.namespace }}"
+          deployment: "{{ incident.labels.deployment }}"
+        risk_level: low
+        
+      - id: scale-deployment
+        name: "Scale deployment up"
+        type: kubernetes_action
+        description: "Increase replicas by 2 or to 5, whichever is greater"
+        params:
+          action: scale_deployment
+          namespace: "{{ incident.labels.namespace }}"
+          deployment: "{{ incident.labels.deployment }}"
+          replicas: "{{ max(5, step_results.check_current_replicas.output.replicas + 2) }}"
+        risk_level: medium
+        timeout_seconds: 60
+        retry_count: 2
+        
+      - id: wait-stabilization
+        name: "Wait for pods to stabilize"
+        type: wait
+        params:
+          duration_seconds: 45
+        risk_level: low
+        
+      - id: verify-cpu
+        name: "Verify CPU has normalized"
+        type: query_metrics
+        params:
+          query: 'rate(container_cpu_usage_seconds_total{namespace="{{ incident.labels.namespace }}", pod=~"{{ incident.labels.pod }}.*"}[5m]) * 100'
+          expected_condition: "value < 80"
+        risk_level: low
+        
+      - id: conditional-notification
+        name: "Success or escalation notification"
+        type: conditional
+        condition: "{{ step_results.verify_cpu.output.value < 80 }}"
+        on_success:
+          - id: success-notification
+            name: "Post success message"
+            type: notification
+            params:
+              integration: slack
+              channel: "#incidents"
+              message: |
+                ✅ Auto-Response Successful
+                
+                Scaled {{ incident.labels.deployment }} to {{ step_results.scale_deployment.output.new_replicas }} replicas
+                CPU usage: {{ step_results.verify_cpu.output.value }}%
+                
+                Incident will auto-resolve if alert clears.
+        on_failure:
+          - id: escalation-notification
+            name: "Escalate to on-call"
+            type: notification
+            params:
+              integration: slack
+              channel: "#incidents"
+              message: |
+                ⚠️ Auto-Response Did Not Resolve Issue
+                
+                Scaled deployment but CPU still high: {{ step_results.verify_cpu.output.value }}%
+                Escalating to @oncall for manual intervention.
+              mention: "@oncall"
+    
+    # Rollback if something fails
+    rollback_steps:
+      - id: rollback-scale
+        name: "Rollback to original replica count"
+        type: kubernetes_action
+        params:
+          action: scale_deployment
+          namespace: "{{ incident.labels.namespace }}"
+          deployment: "{{ incident.labels.deployment }}"
+          replicas: "{{ step_results.check_current_replicas.output.replicas }}"
+
+  # ==============================================
+  # Example 2: Pod Crash Loop Recovery
+  # ==============================================
+  pod-crashloop-recovery:
+    name: "Pod CrashLoopBackOff Recovery"
+    description: "Attempt to recover pods stuck in crash loop"
+    version: "1.0.0"
+    enabled: true
+    auto_execute: false  # Requires approval
+    
+    trigger_conditions:
+      alert_names:
+        - PodCrashLooping
+        - PodNotReady
+    
+    steps:
+      - id: get-pod-logs
+        name: "Fetch recent pod logs"
+        type: kubernetes_action
+        params:
+          action: get_pod_logs
+          namespace: "{{ incident.labels.namespace }}"
+          pod: "{{ incident.labels.pod }}"
+          tail_lines: 100
+        risk_level: low
+        
+      - id: analyze-logs
+        name: "ML: Analyze crash reason"
+        type: ml_analysis
+        params:
+          task: log_analysis
+          logs: "{{ step_results.get_pod_logs.output }}"
+        risk_level: low
+        
+      - id: check-configmap
+        name: "Check ConfigMap for issues"
+        type: kubernetes_action
+        params:
+          action: get_configmap
+          namespace: "{{ incident.labels.namespace }}"
+          name: "{{ incident.labels.config }}"
+        risk_level: low
+        continue_on_failure: true
+        
+      - id: restart-pod
+        name: "Delete pod to force restart"
+        type: kubernetes_action
+        params:
+          action: delete_pod
+          namespace: "{{ incident.labels.namespace }}"
+          pod: "{{ incident.labels.pod }}"
+          grace_period: 30
+        risk_level: high
+        requires_approval: true
+        
+      - id: wait-for-pod
+        name: "Wait for new pod to start"
+        type: wait
+        params:
+          duration_seconds: 60
+        
+      - id: check-pod-status
+        name: "Verify pod is running"
+        type: kubernetes_action
+        params:
+          action: get_pod_status
+          namespace: "{{ incident.labels.namespace }}"
+          label_selector: "{{ incident.labels.selector }}"
+        
+      - id: verify-resolution
+        name: "Check if pod is healthy"
+        type: conditional
+        condition: "{{ step_results.check_pod_status.output.ready }}"
+        on_success:
+          - id: success
+            type: notification
+            params:
+              integration: slack
+              message: "✅ Pod recovered successfully"
+        on_failure:
+          - id: rollback-needed
+            type: notification
+            params:
+              integration: slack
+              message: "❌ Pod still failing. Recommend rollback to previous version."
+
+  # ==============================================
+  # Example 3: Database Connection Pool Exhaustion
+  # ==============================================
+  db-connection-pool-fix:
+    name: "Database Connection Pool Recovery"
+    description: "Fix database connection pool exhaustion"
+    version: "1.0.0"
+    enabled: true
+    auto_execute: true
+    
+    trigger_conditions:
+      alert_names:
+        - DatabaseConnectionPoolExhausted
+        - DatabaseConnectionTimeout
+    
+    steps:
+      - id: query-db-connections
+        name: "Query current DB connections"
+        type: query_metrics
+        params:
+          query: 'pg_stat_database_numbackends{database="{{ incident.labels.database }}"}'
+        
+      - id: query-pool-stats
+        name: "Query connection pool stats"
+        type: query_metrics
+        params:
+          query: 'db_connection_pool_active{service="{{ incident.labels.service }}"}'
+        
+      - id: identify-culprit
+        name: "ML: Identify which service is leaking connections"
+        type: ml_analysis
+        params:
+          task: connection_leak_detection
+          
+      - id: restart-pods-gradually
+        name: "Restart pods one by one"
+        type: kubernetes_action
+        params:
+          action: rolling_restart
+          namespace: "{{ incident.labels.namespace }}"
+          deployment: "{{ incident.labels.deployment }}"
+          max_unavailable: 1
+        risk_level: medium
+        timeout_seconds: 300
+        
+      - id: wait-connections-clear
+        name: "Wait for connections to normalize"
+        type: wait
+        params:
+          duration_seconds: 60
+        
+      - id: verify-pool-recovered
+        name: "Verify connection pool recovered"
+        type: query_metrics
+        params:
+          query: 'db_connection_pool_active{service="{{ incident.labels.service }}"}'
+          expected_condition: "value < 80"
+        
+      - id: create-followup-task
+        name: "Create Jira ticket for code fix"
+        type: notification
+        params:
+          integration: jira
+          issue_type: Task
+          summary: "Fix connection leak in {{ incident.labels.service }}"
+          description: |
+            Connection pool exhaustion detected. Immediate fix applied (restart).
+            
+            Root cause: {{ incident.ml_insights.root_cause.primary }}
+            
+            Action required: Fix connection leak in application code.
+        continue_on_failure: true
+
+  # ==============================================
+  # Example 4: Parallel Diagnostic Runbook
+  # ==============================================
+  comprehensive-diagnostics:
+    name: "Comprehensive System Diagnostics"
+    description: "Run multiple diagnostic checks in parallel"
+    version: "1.0.0"
+    enabled: true
+    auto_execute: true
+    
+    trigger_conditions:
+      severities:
+        - critical
+    
+    steps:
+      - id: parallel-diagnostics
+        name: "Run diagnostics in parallel"
+        type: parallel
+        description: "Execute multiple diagnostic queries simultaneously"
+        steps:
+          - id: check-cpu
+            name: "Check CPU usage"
+            type: query_metrics
+            params:
+              query: 'rate(container_cpu_usage_seconds_total[5m]) * 100'
+              
+          - id: check-memory
+            name: "Check memory usage"
+            type: query_metrics
+            params:
+              query: 'container_memory_usage_bytes / container_spec_memory_limit_bytes * 100'
+              
+          - id: check-disk
+            name: "Check disk usage"
+            type: query_metrics
+            params:
+              query: 'node_filesystem_avail_bytes / node_filesystem_size_bytes * 100'
+              
+          - id: check-network
+            name: "Check network errors"
+            type: query_metrics
+            params:
+              query: 'rate(node_network_transmit_errs_total[5m])'
+              
+          - id: check-logs
+            name: "Fetch error logs"
+            type: query_logs
+            params:
+              query: '{namespace="{{ incident.labels.namespace }}"} |= "ERROR"'
+              limit: 50
+              
+          - id: check-events
+            name: "Get Kubernetes events"
+            type: kubernetes_action
+            params:
+              action: get_events
+              namespace: "{{ incident.labels.namespace }}"
+              field_selector: "type=Warning"
+        
+      - id: ml-correlate
+        name: "ML: Correlate diagnostic results"
+        type: ml_analysis
+        params:
+          task: diagnostic_correlation
+          diagnostics: "{{ step_results.parallel_diagnostics }}"
+        
+      - id: generate-report
+        name: "Generate diagnostic report"
+        type: notification
+        params:
+          integration: slack
+          message: |
+            📊 Diagnostic Report for {{ incident.id }}
+            
+            **CPU**: {{ step_results.parallel_diagnostics.check_cpu.output.value }}%
+            **Memory**: {{ step_results.parallel_diagnostics.check_memory.output.value }}%
+            **Disk**: {{ step_results.parallel_diagnostics.check_disk.output.value }}%
+            **Network Errors**: {{ step_results.parallel_diagnostics.check_network.output.value }}
+            
+            **ML Analysis**: {{ step_results.ml_correlate.output.summary }}
+            
+            **Recommendation**: {{ step_results.ml_correlate.output.recommendation }}
+
+  # ==============================================
+  # Example 5: Service Dependency Health Check
+  # ==============================================
+  service-dependency-check:
+    name: "Service Dependency Health Check"
+    description: "Check health of all service dependencies"
+    version: "1.0.0"
+    enabled: true
+    auto_execute: true
+    
+    steps:
+      - id: check-database
+        name: "Check database connectivity"
+        type: script_execution
+        params:
+          language: python
+          script: |
+            import asyncpg
+            async with asyncpg.create_pool(os.getenv("DATABASE_URL")) as pool:
+                async with pool.acquire() as conn:
+                    result = await conn.fetchval("SELECT 1")
+                    return {"healthy": result == 1}
+        continue_on_failure: true
+        
+      - id: check-redis
+        name: "Check Redis connectivity"
+        type: script_execution
+        params:
+          language: python
+          script: |
+            import redis
+            r = redis.from_url(os.getenv("REDIS_URL"))
+            result = r.ping()
+            return {"healthy": result}
+        continue_on_failure: true
+        
+      - id: check-external-apis
+        name: "Check external API health"
+        type: parallel
+        steps:
+          - id: check-prometheus
+            type: http_request
+            params:
+              method: GET
+              url: "{{ config.prometheus_url }}/-/healthy"
+              
+          - id: check-loki
+            type: http_request
+            params:
+              method: GET
+              url: "{{ config.loki_url }}/ready"
+        
+      - id: aggregate-health
+        name: "Aggregate health status"
+        type: script_execution
+        params:
+          language: python
+          script: |
+            results = context["step_results"]
+            unhealthy = []
+            for step, result in results.items():
+                if not result.get("output", {}).get("healthy", False):
+                    unhealthy.append(step)
+            return {
+                "all_healthy": len(unhealthy) == 0,
+                "unhealthy_services": unhealthy
+            }
+        
+      - id: report-health
+        name: "Report health status"
+        type: notification
+        params:
+          integration: slack
+          message: |
+            🏥 Dependency Health Check
+            
+            {% if step_results.aggregate_health.output.all_healthy %}
+            ✅ All dependencies healthy
+            {% else %}
+            ⚠️ Unhealthy dependencies:
+            {% for service in step_results.aggregate_health.output.unhealthy_services %}
+            - {{ service }}
+            {% endfor %}
+            {% endif %}
+
+# Runbook Templates
+# These can be used as starting points for ML-generated runbooks
+templates:
+  restart_service:
+    description: "Template for restarting a service"
+    steps:
+      - notify_start
+      - check_current_state
+      - perform_restart
+      - wait_stabilization
+      - verify_health
+      - notify_result
+  
+  scale_service:
+    description: "Template for scaling a service"
+    steps:
+      - notify_start
+      - check_current_replicas
+      - scale_to_target
+      - wait_stabilization
+      - verify_metrics
+      - notify_result
+  
+  rollback_deployment:
+    description: "Template for rolling back a deployment"
+    steps:
+      - notify_start
+      - get_previous_revision
+      - perform_rollback
+      - wait_rollout
+      - verify_health
+      - notify_result

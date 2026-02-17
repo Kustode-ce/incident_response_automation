@@ -1,0 +1,425 @@
+# Incident Response Automation - Local Development Stack
+# Usage: docker-compose up --build
+
+services:
+  # ===========================================
+  # PostgreSQL Database
+  # ===========================================
+  db:
+    build:
+      context: .
+      dockerfile: deploy/docker/Dockerfile.db
+    container_name: incident-db
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-incident_response}
+      POSTGRES_USER: ${POSTGRES_USER:-incident_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-incident_pass}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    networks:
+      - incident-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-incident_user} -d ${POSTGRES_DB:-incident_response}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ===========================================
+  # Redis Cache & Message Broker
+  # ===========================================
+  redis:
+    build:
+      context: .
+      dockerfile: deploy/docker/Dockerfile.redis
+    container_name: incident-redis
+    volumes:
+      - redis_data:/data
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    networks:
+      - incident-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+  # ===========================================
+  # API Service (FastAPI)
+  # ===========================================
+  api:
+    build:
+      context: .
+      dockerfile: deploy/docker/Dockerfile.api
+    container_name: incident-api
+    environment:
+      # Application
+      - ENVIRONMENT=${ENVIRONMENT:-development}
+      - DEBUG=${DEBUG:-true}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - API_HOST=0.0.0.0
+      - API_PORT=8000
+      
+      # Database
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-incident_user}:${POSTGRES_PASSWORD:-incident_pass}@db:5432/${POSTGRES_DB:-incident_response}
+      - SQL_ECHO=${SQL_ECHO:-false}
+      
+      # Redis
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+      
+      # ML Providers (optional for local testing)
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      
+      # Feature Flags
+      - ENABLE_ML_CLASSIFICATION=${ENABLE_ML_CLASSIFICATION:-false}
+      - ENABLE_ML_ROOT_CAUSE=${ENABLE_ML_ROOT_CAUSE:-false}
+      - ENABLE_METRICS=${ENABLE_METRICS:-true}
+      - ENABLE_TELEMETRY=${ENABLE_TELEMETRY:-true}
+      - DEMO_MODE=${DEMO_MODE:-false}
+      
+      # OpenTelemetry Configuration
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+      - OTEL_SERVICE_NAME=incident-api
+      - OTEL_RESOURCE_ATTRIBUTES=service.namespace=incident-response,deployment.environment=development
+      - SERVICE_VERSION=1.0.0
+
+      # Integrations
+      - PROMETHEUS_URL=${PROMETHEUS_URL:-http://prometheus:9090}
+      - LOKI_URL=${LOKI_URL:-http://loki:3100}
+      - GRAFANA_URL=${GRAFANA_URL:-http://grafana:3000}
+      - SLACK_WEBHOOK_URL=${SLACK_WEBHOOK_URL:-}
+      - SLACK_BOT_TOKEN=${SLACK_BOT_TOKEN:-}
+      - SLACK_APP_TOKEN=${SLACK_APP_TOKEN:-}
+      - SLACK_SIGNING_SECRET=${SLACK_SIGNING_SECRET:-}
+      - SLACK_INCIDENTS_CHANNEL=${SLACK_INCIDENTS_CHANNEL:-#incidents}
+      - JIRA_URL=${JIRA_URL:-}
+      - JIRA_USERNAME=${JIRA_USERNAME:-}
+      - JIRA_API_TOKEN=${JIRA_API_TOKEN:-}
+      - JIRA_PROJECT=${JIRA_PROJECT:-INC}
+      - JIRA_ISSUE_TYPE=${JIRA_ISSUE_TYPE:-Bug}
+      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+      - GITHUB_REPO=${GITHUB_REPO:-}
+    ports:
+      - "${API_PORT:-8000}:8000"
+    volumes:
+      # Mount source code for hot reload in development
+      - ./src:/app/src
+      - ./alembic:/app/alembic
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - incident-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    # Development mode: enable hot reload
+    command: uvicorn src.main:app --host 0.0.0.0 --port 8000 --reload
+
+  # ===========================================
+  # Celery Worker (Background Tasks)
+  # ===========================================
+  worker:
+    build:
+      context: .
+      dockerfile: deploy/docker/Dockerfile.worker
+    container_name: incident-worker
+    environment:
+      # Application
+      - ENVIRONMENT=${ENVIRONMENT:-development}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      
+      # Database
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-incident_user}:${POSTGRES_PASSWORD:-incident_pass}@db:5432/${POSTGRES_DB:-incident_response}
+      
+      # Redis
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+      
+      # ML Providers
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      
+      # OpenTelemetry Configuration
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+      - OTEL_SERVICE_NAME=incident-worker
+      - OTEL_RESOURCE_ATTRIBUTES=service.namespace=incident-response,deployment.environment=development
+      - ENABLE_TELEMETRY=${ENABLE_TELEMETRY:-true}
+
+      # Integrations
+      - PROMETHEUS_URL=${PROMETHEUS_URL:-http://prometheus:9090}
+      - LOKI_URL=${LOKI_URL:-http://loki:3100}
+      - GRAFANA_URL=${GRAFANA_URL:-http://grafana:3000}
+      - SLACK_WEBHOOK_URL=${SLACK_WEBHOOK_URL:-}
+      - SLACK_BOT_TOKEN=${SLACK_BOT_TOKEN:-}
+      - SLACK_APP_TOKEN=${SLACK_APP_TOKEN:-}
+      - SLACK_SIGNING_SECRET=${SLACK_SIGNING_SECRET:-}
+      - SLACK_INCIDENTS_CHANNEL=${SLACK_INCIDENTS_CHANNEL:-#incidents}
+      - JIRA_URL=${JIRA_URL:-}
+      - JIRA_USERNAME=${JIRA_USERNAME:-}
+      - JIRA_API_TOKEN=${JIRA_API_TOKEN:-}
+      - JIRA_PROJECT=${JIRA_PROJECT:-INC}
+      - JIRA_ISSUE_TYPE=${JIRA_ISSUE_TYPE:-Bug}
+      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+      - GITHUB_REPO=${GITHUB_REPO:-}
+    volumes:
+      - ./src:/app/src:ro
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - incident-network
+    restart: unless-stopped
+    # Run all queues in development
+    command: celery -A src.workers.celery_app worker --loglevel=info --concurrency=2 -Q runbooks,notifications,ml,celery
+
+  # ===========================================
+  # Celery Beat (Scheduled Tasks)
+  # ===========================================
+  beat:
+    build:
+      context: .
+      dockerfile: deploy/docker/Dockerfile.worker
+    container_name: incident-beat
+    environment:
+      - ENVIRONMENT=${ENVIRONMENT:-development}
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+    volumes:
+      - ./src:/app/src:ro
+    depends_on:
+      - worker
+    networks:
+      - incident-network
+    restart: unless-stopped
+    command: celery -A src.workers.celery_app beat --loglevel=info
+
+  # ===========================================
+  # Flower (Celery Monitoring) - Optional
+  # ===========================================
+  flower:
+    build:
+      context: .
+      dockerfile: deploy/docker/Dockerfile.worker
+    container_name: incident-flower
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - FLOWER_PORT=5555
+    ports:
+      - "${FLOWER_PORT:-5555}:5555"
+    depends_on:
+      - redis
+      - worker
+    networks:
+      - incident-network
+    restart: unless-stopped
+    command: celery -A src.workers.celery_app flower --port=5555
+    profiles:
+      - monitoring
+
+  # ===========================================
+  # OBSERVABILITY STACK
+  # ===========================================
+
+  # Prometheus - Metrics Collection
+  prometheus:
+    image: prom/prometheus:v2.48.0
+    container_name: incident-prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.enable-lifecycle'
+      - '--web.enable-remote-write-receiver'
+    volumes:
+      - ./deploy/observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./deploy/observability/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    networks:
+      - incident-network
+    restart: unless-stopped
+    profiles:
+      - observability
+
+  # Alertmanager - Alert Routing
+  alertmanager:
+    image: prom/alertmanager:v0.26.0
+    container_name: incident-alertmanager
+    command:
+      - '--config.file=/etc/alertmanager/alertmanager.yml'
+      - '--storage.path=/alertmanager'
+    volumes:
+      - ./deploy/observability/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager_data:/alertmanager
+    ports:
+      - "${ALERTMANAGER_PORT:-9093}:9093"
+    networks:
+      - incident-network
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+    profiles:
+      - observability
+
+  # Grafana - Dashboards & Visualization
+  grafana:
+    image: grafana/grafana:10.2.2
+    container_name: incident-grafana
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-admin}
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_SERVER_ROOT_URL=${GRAFANA_ROOT_URL:-http://localhost:3000}
+      - GF_INSTALL_PLUGINS=grafana-clock-panel,grafana-piechart-panel
+    volumes:
+      - ./deploy/observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    networks:
+      - incident-network
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+      - loki
+    profiles:
+      - observability
+
+  # Loki - Log Aggregation
+  loki:
+    image: grafana/loki:2.9.2
+    container_name: incident-loki
+    command: -config.file=/etc/loki/loki.yml
+    volumes:
+      - ./deploy/observability/loki/loki.yml:/etc/loki/loki.yml:ro
+      - loki_data:/loki
+    ports:
+      - "${LOKI_PORT:-3100}:3100"
+    networks:
+      - incident-network
+    restart: unless-stopped
+    profiles:
+      - observability
+
+  # Promtail - Log Collector (ships logs to Loki)
+  promtail:
+    image: grafana/promtail:2.9.2
+    container_name: incident-promtail
+    command: -config.file=/etc/promtail/promtail.yml
+    volumes:
+      - ./deploy/observability/promtail/promtail.yml:/etc/promtail/promtail.yml:ro
+      - /var/log:/var/log:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - incident-network
+    restart: unless-stopped
+    depends_on:
+      - loki
+    profiles:
+      - observability
+
+  # Jaeger - Distributed Tracing UI (receives traces from OTEL Collector)
+  jaeger:
+    image: jaegertracing/all-in-one:1.52
+    container_name: incident-jaeger
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+      - METRICS_STORAGE_TYPE=prometheus
+      - PROMETHEUS_SERVER_URL=http://prometheus:9090
+    ports:
+      - "${JAEGER_UI_PORT:-16686}:16686"      # Jaeger UI
+      - "14269:14269"                          # Admin/metrics
+    networks:
+      - incident-network
+    restart: unless-stopped
+    profiles:
+      - observability
+
+  # Tempo - Distributed Tracing Backend (Grafana's trace backend)
+  tempo:
+    image: grafana/tempo:2.3.1
+    container_name: incident-tempo
+    command: ["-config.file=/etc/tempo/tempo.yaml"]
+    volumes:
+      - ./deploy/observability/tempo/tempo-config.yaml:/etc/tempo/tempo.yaml:ro
+      - tempo_data:/var/tempo
+    ports:
+      - "${TEMPO_HTTP_PORT:-3200}:3200"       # Tempo HTTP API
+      - "${TEMPO_GRPC_PORT:-9095}:9095"       # Tempo gRPC
+    networks:
+      - incident-network
+    restart: unless-stopped
+    profiles:
+      - observability
+
+  # OpenTelemetry Collector - Receives traces/metrics from services
+  # Sends to Tempo (primary) and Jaeger (secondary) for distributed tracing
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.91.0
+    container_name: incident-otel-collector
+    command: ["--config=/etc/otel-collector-config.yaml"]
+    volumes:
+      - ./deploy/observability/otel/otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro
+    ports:
+      - "${OTEL_GRPC_PORT:-4317}:4317"        # OTLP gRPC receiver
+      - "${OTEL_HTTP_PORT:-4318}:4318"        # OTLP HTTP receiver
+      - "${OTEL_METRICS_PORT:-8889}:8889"     # Prometheus metrics
+      - "${OTEL_SPM_PORT:-8890}:8890"         # SPM metrics
+      - "${OTEL_HEALTH_PORT:-13133}:13133"    # Health check
+    networks:
+      - incident-network
+    restart: unless-stopped
+    depends_on:
+      - tempo
+      - loki
+      - prometheus
+    profiles:
+      - observability
+
+# ===========================================
+# Volumes
+# ===========================================
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  prometheus_data:
+    driver: local
+  alertmanager_data:
+    driver: local
+  grafana_data:
+    driver: local
+  loki_data:
+    driver: local
+  tempo_data:
+    driver: local
+
+# ===========================================
+# Networks
+# ===========================================
+networks:
+  incident-network:
+    name: incident-response-network
+    driver: bridge

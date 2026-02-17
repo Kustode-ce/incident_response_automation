@@ -1,0 +1,183 @@
+# OpenTelemetry Collector Configuration for Incident Response Automation
+# Mirrors medical_billing setup for consistent observability
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+  
+  # Prometheus metrics scraping from incident response services
+  prometheus:
+    config:
+      global:
+        scrape_interval: 15s
+        evaluation_interval: 15s
+      scrape_configs:
+        - job_name: 'incident-api'
+          static_configs:
+            - targets: ['api:8000']
+          metrics_path: '/metrics'
+          scrape_interval: 15s
+        
+        - job_name: 'incident-worker'
+          static_configs:
+            - targets: ['worker:8000']
+          metrics_path: '/metrics'
+          scrape_interval: 15s
+
+# SpanMetrics Connector for RED metrics (Request rate, Error rate, Duration)
+# Converts trace spans to Prometheus metrics
+connectors:
+  spanmetrics:
+    namespace: traces_spanmetrics
+    
+    histogram:
+      explicit:
+        buckets: [2ms, 5ms, 10ms, 25ms, 50ms, 100ms, 250ms, 500ms, 1s, 2s, 5s, 10s]
+    
+    # Dimensions to include in metrics
+    dimensions:
+      - name: http.method
+        default: "UNKNOWN"
+      - name: http.route
+        default: "UNKNOWN"
+      - name: http.status_code
+        default: "200"
+      - name: peer.service
+      - name: db.system
+      - name: db.operation
+      - name: error.type
+      - name: incident.severity
+      - name: incident.category
+    
+    dimensions_cache_size: 1000
+    aggregation_temporality: "AGGREGATION_TEMPORALITY_CUMULATIVE"
+    metrics_flush_interval: 15s
+    
+    exemplars:
+      enabled: true
+
+processors:
+  batch:
+    timeout: 1s
+    send_batch_size: 1024
+    send_batch_max_size: 2048
+  
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 512
+    spike_limit_mib: 128
+  
+  resource:
+    attributes:
+      - key: service.namespace
+        value: "incident-response"
+        action: upsert
+      - key: deployment.environment
+        value: "development"
+        action: upsert
+
+  attributes/enrich:
+    actions:
+      - key: http.method
+        action: convert
+        converted_type: string
+      - key: service.namespace
+        value: "incident-response"
+        action: upsert
+
+exporters:
+  # Application metrics to Prometheus
+  prometheus:
+    endpoint: "0.0.0.0:8889"
+    namespace: "incident_response"
+    const_labels:
+      environment: "development"
+      stack: "incident-response-automation"
+  
+  # SPM metrics from spanmetrics connector
+  prometheus/spanmetrics:
+    endpoint: "0.0.0.0:8890"
+    const_labels:
+      environment: "development"
+      source: "spanmetrics"
+  
+  # Traces to Tempo
+  otlp/tempo:
+    endpoint: "tempo:4317"
+    tls:
+      insecure: true
+    retry_on_failure:
+      enabled: true
+      initial_interval: 5s
+      max_interval: 30s
+      max_elapsed_time: 300s
+  
+  # Traces to Jaeger
+  otlp/jaeger:
+    endpoint: "jaeger:4317"
+    tls:
+      insecure: true
+    retry_on_failure:
+      enabled: true
+      initial_interval: 5s
+      max_interval: 30s
+  
+  # Logs to Loki
+  loki:
+    endpoint: "http://loki:3100/loki/api/v1/push"
+    default_labels_enabled:
+      exporter: true
+      job: true
+  
+  # Debug logging
+  debug:
+    verbosity: basic
+    sampling_initial: 5
+    sampling_thereafter: 200
+
+service:
+  extensions: [health_check]
+  pipelines:
+    # Traces pipeline
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, attributes/enrich, resource, batch]
+      exporters: [otlp/tempo, otlp/jaeger, spanmetrics, debug]
+    
+    # Application metrics pipeline
+    metrics:
+      receivers: [otlp, prometheus]
+      processors: [memory_limiter, resource, batch]
+      exporters: [prometheus, debug]
+    
+    # SPM metrics from spanmetrics
+    metrics/spanmetrics:
+      receivers: [spanmetrics]
+      processors: [memory_limiter, batch]
+      exporters: [prometheus/spanmetrics]
+    
+    # Logs pipeline
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, resource, batch]
+      exporters: [loki, debug]
+  
+  telemetry:
+    logs:
+      level: "info"
+    metrics:
+      level: "detailed"
+      readers:
+        - pull:
+            exporter:
+              prometheus:
+                host: "0.0.0.0"
+                port: 8888
