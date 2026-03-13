@@ -1,0 +1,188 @@
+name: "[Incident] Build and Push to ECR"
+
+on:
+  push:
+    branches:
+      - dev
+      - main
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        type: choice
+        options:
+          - dev
+          - prod
+      components:
+        description: 'Components to build (comma-separated or "all")'
+        required: false
+        default: 'all'
+
+env:
+  AWS_REGION: "us-east-1"
+  DEV_AWS_ACCOUNT_ID: "682033485149"
+  PROD_AWS_ACCOUNT_ID: "636916854574"
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: incident-build-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Prepare Build Matrix
+    runs-on: ubuntu-latest
+    outputs:
+      environment: ${{ steps.env.outputs.environment }}
+      ecr_repository: ${{ steps.env.outputs.ecr_repository }}
+      ecr_registry: ${{ steps.env.outputs.ecr_registry }}
+      oidc_role: ${{ steps.env.outputs.oidc_role }}
+      image_tag: ${{ steps.env.outputs.image_tag }}
+      components: ${{ steps.matrix.outputs.components }}
+
+    steps:
+      - name: Determine environment
+        id: env
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            ENV="${{ inputs.environment }}"
+          elif [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+            ENV="prod"
+          else
+            ENV="dev"
+          fi
+
+          echo "environment=$ENV" >> $GITHUB_OUTPUT
+          echo "image_tag=${GITHUB_SHA}" >> $GITHUB_OUTPUT
+
+          if [[ "$ENV" == "prod" ]]; then
+            echo "ecr_repository=prod/incident-response" >> $GITHUB_OUTPUT
+            echo "ecr_registry=${{ env.PROD_AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com" >> $GITHUB_OUTPUT
+            echo "oidc_role=arn:aws:iam::${{ env.PROD_AWS_ACCOUNT_ID }}:role/GithubOidcRole-Prod" >> $GITHUB_OUTPUT
+          else
+            echo "ecr_repository=dev/incident-response" >> $GITHUB_OUTPUT
+            echo "ecr_registry=${{ env.DEV_AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com" >> $GITHUB_OUTPUT
+            echo "oidc_role=arn:aws:iam::${{ env.DEV_AWS_ACCOUNT_ID }}:role/GithubOidcRole-Dev" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Build component matrix
+        id: matrix
+        run: |
+          INPUT="${{ inputs.components || 'all' }}"
+          if [[ "$INPUT" == "all" ]]; then
+            echo 'components=["api","worker","beat"]' >> $GITHUB_OUTPUT
+          else
+            echo "components=$(echo "$INPUT" | jq -Rc 'split(",") | map(gsub("^\\s+|\\s+$"; ""))')" >> $GITHUB_OUTPUT
+          fi
+
+  build-and-push:
+    name: "Build ${{ matrix.component }}"
+    needs: prepare
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        component: ${{ fromJson(needs.prepare.outputs.components) }}
+      fail-fast: false
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ needs.prepare.outputs.oidc_role }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: GitHubActions-IncidentBuild-${{ github.run_id }}-${{ matrix.component }}
+
+      - name: Ensure ECR repository exists
+        run: |
+          REPO="${{ needs.prepare.outputs.ecr_repository }}"
+          if ! aws ecr describe-repositories --repository-names "$REPO" 2>/dev/null; then
+            aws ecr create-repository \
+              --repository-name "$REPO" \
+              --image-scanning-configuration scanOnPush=true \
+              --encryption-configuration encryptionType=AES256 \
+              --image-tag-mutability MUTABLE
+
+            aws ecr put-lifecycle-policy \
+              --repository-name "$REPO" \
+              --lifecycle-policy-text '{
+                "rules": [{
+                  "rulePriority": 1,
+                  "description": "Keep last 30 images",
+                  "selection": {
+                    "tagStatus": "any",
+                    "countType": "imageCountMoreThan",
+                    "countNumber": 30
+                  },
+                  "action": {"type": "expire"}
+                }]
+              }'
+          fi
+
+      - name: Login to ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: deploy/docker/Dockerfile.${{ matrix.component }}
+          push: true
+          tags: |
+            ${{ needs.prepare.outputs.ecr_registry }}/${{ needs.prepare.outputs.ecr_repository }}:${{ matrix.component }}-${{ needs.prepare.outputs.image_tag }}
+            ${{ needs.prepare.outputs.ecr_registry }}/${{ needs.prepare.outputs.ecr_repository }}:${{ matrix.component }}-latest
+          platforms: linux/amd64
+          cache-from: type=gha,scope=incident-${{ matrix.component }}-${{ needs.prepare.outputs.environment }}
+          cache-to: type=gha,mode=max,scope=incident-${{ matrix.component }}-${{ needs.prepare.outputs.environment }}
+          build-args: |
+            ENV=${{ needs.prepare.outputs.environment }}
+            VERSION=${{ needs.prepare.outputs.image_tag }}
+
+      - name: Verify image in ECR
+        run: |
+          aws ecr describe-images \
+            --repository-name "${{ needs.prepare.outputs.ecr_repository }}" \
+            --image-ids imageTag="${{ matrix.component }}-${{ needs.prepare.outputs.image_tag }}" \
+            --region ${{ env.AWS_REGION }}
+
+  summary:
+    name: Build Summary
+    needs: [prepare, build-and-push]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate summary
+        run: |
+          ENV="${{ needs.prepare.outputs.environment }}"
+          TAG="${{ needs.prepare.outputs.image_tag }}"
+          REPO="${{ needs.prepare.outputs.ecr_repository }}"
+          REGISTRY="${{ needs.prepare.outputs.ecr_registry }}"
+
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          # Incident Response Build Summary
+
+          | Item | Value |
+          |------|-------|
+          | **Environment** | \`$ENV\` |
+          | **Commit** | \`${{ github.sha }}\` |
+          | **Build Result** | ${{ needs.build-and-push.result }} |
+
+          ## Images
+          | Component | Image |
+          |-----------|-------|
+          | API | \`$REGISTRY/$REPO:api-$TAG\` |
+          | Worker | \`$REGISTRY/$REPO:worker-$TAG\` |
+          | Beat | \`$REGISTRY/$REPO:beat-$TAG\` |
+
+          ---
+          *Build completed at $(date -u '+%Y-%m-%d %H:%M:%S UTC')*
+          EOF
