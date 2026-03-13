@@ -17,6 +17,7 @@ celery_app = Celery(
         "src.workers.tasks.runbook_tasks",
         "src.workers.tasks.notification_tasks",
         "src.workers.tasks.ml_tasks",
+        "src.workers.tasks.enrichment",
     ],
 )
 
@@ -60,6 +61,7 @@ celery_app.conf.task_routes = {
     "src.workers.tasks.runbook_tasks.*": {"queue": "runbooks"},
     "src.workers.tasks.notification_tasks.*": {"queue": "notifications"},
     "src.workers.tasks.ml_tasks.*": {"queue": "ml"},
+    "src.workers.tasks.enrichment.*": {"queue": "enrichment"},
 }
 
 if __name__ == "__main__":

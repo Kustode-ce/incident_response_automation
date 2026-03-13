@@ -5,8 +5,12 @@ import hmac
 import logging
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from pydantic import BaseModel
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from src.services.alert_ingestion_service import AlertIngestionService
+from src.utils.database import get_db_session
 
 logger = logging.getLogger(__name__)
 
@@ -23,29 +27,87 @@ class PrometheusAlert(BaseModel):
     annotations: Dict[str, str] = {}
     startsAt: Optional[str] = None
     endsAt: Optional[str] = None
+    generatorURL: Optional[str] = None
+    fingerprint: Optional[str] = None
 
 
 class PrometheusWebhook(BaseModel):
     status: str
     alerts: list[PrometheusAlert] = []
+    groupLabels: Dict[str, str] = {}
+    commonLabels: Dict[str, str] = {}
+    commonAnnotations: Dict[str, str] = {}
+    externalURL: Optional[str] = None
+    groupKey: Optional[str] = None
 
 
 @router.post("/prometheus")
-async def prometheus_webhook(payload: PrometheusWebhook):
-    """Receive alerts from Prometheus AlertManager."""
-    logger.info(f"Received Prometheus webhook: status={payload.status}, alerts={len(payload.alerts)}")
-    
-    for alert in payload.alerts:
-        logger.info(f"Alert: {alert.labels.get('alertname', 'unknown')} - {alert.status}")
-        # TODO: Create incident or update existing one
-    
-    return {"status": "accepted"}
+async def prometheus_webhook(
+    payload: PrometheusWebhook,
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Receive alerts from Prometheus AlertManager and create/update incidents."""
+    logger.info(
+        "Received Prometheus webhook: status=%s, alerts=%d",
+        payload.status, len(payload.alerts),
+    )
+
+    raw_payload = {
+        "status": payload.status,
+        "alerts": [
+            {
+                "status": a.status,
+                "labels": a.labels,
+                "annotations": a.annotations,
+                "startsAt": a.startsAt,
+                "endsAt": a.endsAt,
+            }
+            for a in payload.alerts
+        ],
+    }
+
+    service = AlertIngestionService(session)
+    results = await service.ingest_alertmanager(raw_payload)
+
+    created = sum(1 for r in results if r.get("status") == "created")
+    deduped = sum(1 for r in results if r.get("status") == "deduplicated")
+    resolved = sum(1 for r in results if r.get("status") == "resolved")
+
+    _trigger_enrichment_for_new_incidents(results)
+
+    return {
+        "status": "accepted",
+        "processed": len(results),
+        "created": created,
+        "deduplicated": deduped,
+        "resolved": resolved,
+        "details": results,
+    }
 
 
 @router.post("/alertmanager")
-async def alertmanager_webhook(payload: PrometheusWebhook):
+async def alertmanager_webhook(
+    payload: PrometheusWebhook,
+    session: AsyncSession = Depends(get_db_session),
+):
     """Alias for Prometheus webhook (AlertManager uses same format)."""
-    return await prometheus_webhook(payload)
+    return await prometheus_webhook(payload, session)
+
+
+def _trigger_enrichment_for_new_incidents(results: list[dict]) -> None:
+    """Fire async enrichment tasks for newly created incidents."""
+    try:
+        from src.workers.tasks.enrichment import enrich_and_notify
+    except ImportError:
+        logger.debug("Celery enrichment tasks not available")
+        return
+
+    for r in results:
+        if r.get("status") == "created" and r.get("incident_id"):
+            try:
+                enrich_and_notify.delay(r["incident_id"])
+            except Exception:
+                logger.warning("Could not enqueue enrichment for %s", r["incident_id"])
 
 
 # ==============================================
@@ -64,13 +126,39 @@ class GrafanaWebhook(BaseModel):
 
 
 @router.post("/grafana")
-async def grafana_webhook(payload: GrafanaWebhook):
-    """Receive alert notifications from Grafana."""
-    logger.info(f"Received Grafana webhook: {payload.title} - {payload.state}")
-    
-    # TODO: Create incident based on Grafana alert
-    
-    return {"status": "accepted"}
+async def grafana_webhook(
+    payload: GrafanaWebhook,
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Receive alert notifications from Grafana and create incidents."""
+    logger.info("Received Grafana webhook: %s - %s", payload.title, payload.state)
+
+    alert_status = "resolved" if payload.state == "ok" else "firing"
+    normalized = {
+        "status": alert_status,
+        "alerts": [
+            {
+                "status": alert_status,
+                "labels": {
+                    "alertname": payload.ruleName or payload.title,
+                    "source": "grafana",
+                    **payload.tags,
+                },
+                "annotations": {
+                    "summary": payload.title,
+                    "description": payload.message or payload.title,
+                    "rule_url": payload.ruleUrl or "",
+                },
+            }
+        ],
+    }
+
+    service = AlertIngestionService(session)
+    results = await service.ingest_alertmanager(normalized)
+
+    _trigger_enrichment_for_new_incidents(results)
+
+    return {"status": "accepted", "details": results}
 
 
 # ==============================================
@@ -78,14 +166,23 @@ async def grafana_webhook(payload: GrafanaWebhook):
 # ==============================================
 
 @router.post("/loki")
-async def loki_webhook(request: Request):
-    """Receive alert notifications from Loki."""
+async def loki_webhook(
+    request: Request,
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Receive alert notifications from Loki and create incidents.
+
+    Loki ruler uses the same webhook format as AlertManager.
+    """
     payload = await request.json()
-    logger.info(f"Received Loki webhook: {payload}")
-    
-    # TODO: Process Loki alerts
-    
-    return {"status": "accepted"}
+    logger.info("Received Loki webhook: status=%s", payload.get("status"))
+
+    service = AlertIngestionService(session)
+    results = await service.ingest_alertmanager(payload)
+
+    _trigger_enrichment_for_new_incidents(results)
+
+    return {"status": "accepted", "details": results}
 
 
 # ==============================================
