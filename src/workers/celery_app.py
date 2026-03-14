@@ -1,8 +1,25 @@
 """Celery application configuration for async task processing."""
 
 from celery import Celery
+from celery.signals import worker_process_init
 
 from src.settings import settings
+
+
+@worker_process_init.connect
+def _init_worker_otel(**kwargs):
+    """Initialize OTEL tracing for each Celery worker process."""
+    try:
+        from src.observability.unified_observability import setup_observability
+        setup_observability(service_name="incident-worker", enable_metrics=False)
+    except Exception:
+        pass
+    try:
+        from src.observability.tracing import instrument_celery
+        instrument_celery()
+    except Exception:
+        pass
+
 
 # Create Celery application
 celery_app = Celery(

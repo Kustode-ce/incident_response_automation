@@ -1,0 +1,59 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: incident-beat
+  namespace: incident-response
+  labels:
+    app: incident-beat
+    app.kubernetes.io/name: incident-beat
+    app.kubernetes.io/part-of: incident-response
+    app.kubernetes.io/component: scheduler
+spec:
+  # Beat must be a singleton to prevent duplicate scheduled tasks
+  replicas: 1
+  selector:
+    matchLabels:
+      app: incident-beat
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: incident-beat
+        app.kubernetes.io/name: incident-beat
+        app.kubernetes.io/part-of: incident-response
+    spec:
+      serviceAccountName: incident-response
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: incident-beat
+          image: incident-worker:latest  # Same image as worker
+          imagePullPolicy: Always
+          command:
+            - celery
+            - -A
+            - src.workers.celery_app
+            - beat
+            - --loglevel=info
+          envFrom:
+            - configMapRef:
+                name: incident-response-config
+            - secretRef:
+                name: incident-response-secrets
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+          livenessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - celery -A src.workers.celery_app inspect ping --timeout=10
+            initialDelaySeconds: 30
+            periodSeconds: 60
+            timeoutSeconds: 15
+            failureThreshold: 3

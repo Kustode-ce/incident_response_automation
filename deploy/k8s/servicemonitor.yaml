@@ -1,0 +1,19 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: incident-api
+  namespace: incident-response
+  labels:
+    app.kubernetes.io/name: incident-api
+    app.kubernetes.io/part-of: incident-response
+spec:
+  selector:
+    matchLabels:
+      app: incident-api
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 15s
+  namespaceSelector:
+    matchNames:
+      - incident-response
