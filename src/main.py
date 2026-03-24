@@ -112,16 +112,16 @@ async def health_check():
         )
 
 
-@app.get("/ready")
+@app.get("/readyz", include_in_schema=False)
 async def readiness_check():
-    """Readiness check for Kubernetes."""
+    """K8s readiness probe — checks DB connectivity before accepting traffic."""
     try:
         db_health = await check_db_health()
         if db_health.get("connected"):
             return {"status": "ready"}
-        return JSONResponse(status_code=503, content={"status": "not ready"})
+        return JSONResponse(status_code=503, content={"status": "not_ready", "reason": "database_unavailable"})
     except Exception:
-        return JSONResponse(status_code=503, content={"status": "not ready"})
+        return JSONResponse(status_code=503, content={"status": "not_ready", "reason": "database_unavailable"})
 
 
 @app.get("/live")
