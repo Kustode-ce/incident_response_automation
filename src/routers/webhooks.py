@@ -6,7 +6,7 @@ import logging
 from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.services.alert_ingestion_service import AlertIngestionService
@@ -108,6 +108,48 @@ def _trigger_enrichment_for_new_incidents(results: list[dict]) -> None:
                 enrich_and_notify.delay(r["incident_id"])
             except Exception:
                 logger.warning("Could not enqueue enrichment for %s", r["incident_id"])
+
+
+# ==============================================
+# Vigil (Kustode agents / Live Monitor)
+# ==============================================
+
+
+class VigilWebhookPayload(BaseModel):
+    """Payload from `agents/integrations/incident_bridge.py` (`IncidentBridge`)."""
+
+    model_config = {"extra": "ignore"}
+
+    source: str = "vigil"
+    title: str
+    description: str = ""
+    severity: str = "medium"
+    category: str = "general"
+    service: Optional[str] = None
+    environment: str = "dev"
+    labels: Any = Field(default_factory=list)
+    context: Dict[str, Any] = Field(default_factory=dict)
+    timestamp: Optional[str] = None
+
+
+@router.post("/vigil")
+async def vigil_webhook(
+    payload: VigilWebhookPayload,
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Create or deduplicate an incident from Vigil Live Monitor / test-runner / chaos."""
+    logger.info("Received Vigil webhook: title=%s", (payload.title or "")[:120])
+    service = AlertIngestionService(session)
+    body = payload.model_dump()
+    results = await service.ingest_vigil(body)
+    _trigger_enrichment_for_new_incidents(results)
+    created = sum(1 for r in results if r.get("status") == "created")
+    return {
+        "status": "accepted",
+        "processed": len(results),
+        "created": created,
+        "details": results,
+    }
 
 
 # ==============================================

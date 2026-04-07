@@ -40,6 +40,23 @@ CATEGORY_MAP: dict[str, IncidentCategory] = {
     "app": IncidentCategory.application,
 }
 
+# Vigil (Live Monitor / test-runner / chaos) category strings → IRA enum
+VIGIL_CATEGORY_MAP: dict[str, IncidentCategory] = {
+    "health": IncidentCategory.application,
+    "security": IncidentCategory.security,
+    "resilience": IncidentCategory.infrastructure,
+    "test-failure": IncidentCategory.application,
+    "general": IncidentCategory.other,
+    "chaos": IncidentCategory.infrastructure,
+}
+
+
+def map_vigil_category(raw: str) -> IncidentCategory:
+    key = (raw or "general").lower().strip()
+    if key in VIGIL_CATEGORY_MAP:
+        return VIGIL_CATEGORY_MAP[key]
+    return map_category({"category": key})
+
 
 def compute_fingerprint(source: str, alertname: str, labels: dict[str, str]) -> str:
     """Deterministic fingerprint for deduplication.
@@ -73,6 +90,29 @@ def map_category(labels: dict[str, str]) -> IncidentCategory:
         return IncidentCategory.network
 
     return IncidentCategory.application
+
+
+def _normalize_vigil_labels(
+    title: str,
+    severity: str,
+    category: str,
+    service: str,
+    raw_labels: Any,
+) -> dict[str, str]:
+    alertname = (title[:240] if title else "vigil") or "vigil"
+    lb: dict[str, str] = {
+        "alertname": alertname,
+        "severity": severity,
+        "category": category,
+    }
+    if service:
+        lb["service"] = service
+    if isinstance(raw_labels, list):
+        lb["tags"] = ",".join(str(x) for x in raw_labels)[:2000]
+    elif isinstance(raw_labels, dict):
+        for k, v in raw_labels.items():
+            lb[str(k)[:128]] = str(v)[:1000]
+    return lb
 
 
 class AlertIngestionService:
@@ -132,8 +172,73 @@ class AlertIngestionService:
             return await self._handle_resolved(alert_record, fingerprint)
 
         return await self._find_or_create_incident(
-            alert_record, fingerprint, title, description, severity, category, labels,
+            alert_record,
+            fingerprint,
+            title,
+            description,
+            severity,
+            category,
+            labels,
+            created_by="alertmanager",
         )
+
+    async def ingest_vigil(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
+        """Process a Vigil IncidentBridge JSON payload; returns one result dict."""
+        title = (payload.get("title") or "Vigil alert").strip()
+        if len(title) > 255:
+            title = title[:252] + "..."
+        description = (payload.get("description") or title).strip()
+        severity_str = (payload.get("severity") or "medium").lower()
+        category_str = (payload.get("category") or "general").lower()
+        service = (payload.get("service") or "") or ""
+        environment = (payload.get("environment") or "dev").strip()
+        context = payload.get("context") if isinstance(payload.get("context"), dict) else {}
+        source_label = (payload.get("source") or "vigil").strip()
+
+        labels = _normalize_vigil_labels(
+            title=title,
+            severity=severity_str,
+            category=category_str,
+            service=service,
+            raw_labels=payload.get("labels"),
+        )
+        alertname = labels.get("alertname", "vigil")
+        fingerprint = compute_fingerprint("vigil", alertname, labels)
+        severity = SEVERITY_MAP.get(severity_str, IncidentSeverity.medium)
+        category = map_vigil_category(category_str)
+
+        alert_record = Alert(
+            source="vigil",
+            status=AlertStatus.firing.value,
+            severity=severity.value,
+            message=description,
+            fingerprint=fingerprint,
+            labels=labels,
+            annotations={"summary": title, "description": description},
+        )
+
+        extra = {
+            "vigil_source": source_label,
+            "environment": environment,
+            "vigil_context": context,
+            "service": service,
+        }
+        try:
+            result = await self._find_or_create_incident(
+                alert_record,
+                fingerprint,
+                title,
+                description,
+                severity,
+                category,
+                labels,
+                created_by="vigil",
+                extra_data=extra,
+            )
+            return [result]
+        except Exception:
+            logger.exception("Failed to ingest Vigil payload: %s", title)
+            return [{"status": "error", "title": title}]
 
     async def _find_or_create_incident(
         self,
@@ -144,6 +249,9 @@ class AlertIngestionService:
         severity: IncidentSeverity,
         category: IncidentCategory,
         labels: dict[str, str],
+        *,
+        created_by: str = "alertmanager",
+        extra_data: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Find existing open incident by fingerprint, or create a new one."""
         result = await self.session.execute(
@@ -164,6 +272,14 @@ class AlertIngestionService:
                 "fingerprint": fingerprint,
             }
 
+        base_extra: dict[str, Any] = {
+            "source": created_by,
+            "alertname": labels.get("alertname", ""),
+            "service": labels.get("service", ""),
+        }
+        if extra_data:
+            base_extra.update(extra_data)
+
         incident = Incident(
             fingerprint=fingerprint,
             title=title,
@@ -172,12 +288,8 @@ class AlertIngestionService:
             severity=severity,
             status=IncidentStatus.new,
             labels={k: v for k, v in labels.items() if k != "alertname"},
-            extra_data={
-                "source": "alertmanager",
-                "alertname": labels.get("alertname", ""),
-                "service": labels.get("service", ""),
-            },
-            created_by="alertmanager",
+            extra_data=base_extra,
+            created_by=created_by,
         )
         await self.incident_repo.create(incident)
 
